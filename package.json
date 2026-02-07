@@ -1,0 +1,16 @@
+{
+  "name": "fictioncord",
+  "version": "1.0.0",
+  "description": "A Discord bot that runs collaborative, turn-based story sessions in a server.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.2.4"
+  }
+}
