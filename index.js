@@ -242,14 +242,14 @@ async function createStoryThread(session, channel, promptText) {
   if (thread.permissionOverwrites) {
     if (everyoneRole) {
       await thread.permissionOverwrites.edit(everyoneRole, {
-        SendMessages: false,
+        SendMessagesInThreads: false,
         AddReactions: true,
       });
     }
 
     if (botMember) {
       await thread.permissionOverwrites.edit(botMember, {
-        SendMessages: true,
+        SendMessagesInThreads: true,
         AddReactions: true,
       });
     }
