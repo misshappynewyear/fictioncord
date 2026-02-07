@@ -227,7 +227,7 @@ async function openEnrollment(guildId, channelId, userId, channel) {
   const state = loadState();
   const existing = getSession(state, guildId);
   if (existing) {
-    clearSession(state, guildId);
+    return false;
   }
 
   const session = {
@@ -262,6 +262,8 @@ async function openEnrollment(guildId, channelId, userId, channel) {
     channel,
     `Hello everyone. We are about to start a Fictioncord session. Who wants to join in as a writer? You have ${ENROLL_HOURS} hours.\nParticipate with /joinfictioncord.`
   );
+
+  return true;
 }
 
 async function joinEnrollment(guildId, userId, channel) {
@@ -619,6 +621,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!guildId || !channel) return;
 
   if (interaction.commandName === 'startfictioncord') {
+    const state = loadState();
+    const existing = getSession(state, guildId);
+    if (existing) {
+      const leaderId = getLeaderId(existing);
+      const currentWriterId = existing.writers[existing.currentWriterIndex];
+      const canEnd =
+        interaction.user.id === leaderId ||
+        (existing.phase === 'writing' && interaction.user.id === currentWriterId);
+      const endHint = canEnd
+        ? 'You can use /theend to end the current session.'
+        : 'If you are the leader or the current writer, you can use /theend to end it.';
+
+      await interaction.reply({
+        content:
+          'A Fictioncord session is already running. You cannot start a new one until it ends.\n' +
+          endHint,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     await interaction.reply({
       content:
         'Starting Fictioncord enrollment...\nYou are the leader of this session. You can use /skipstep to jump to the next step or /theend to end the session at any time.',
@@ -767,3 +790,4 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(TOKEN);
+
