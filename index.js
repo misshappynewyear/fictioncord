@@ -87,6 +87,16 @@ function fmtDuration(ms) {
   return `${hours} hour${hours === 1 ? '' : 's'}`;
 }
 
+function fmtDateTime(ms) {
+  return new Date(ms).toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function getSession(state, guildId) {
   return state.sessions[guildId] || null;
 }
@@ -176,6 +186,31 @@ function buildStory(story) {
     .join('\n\n');
 }
 
+function buildStatusMessage(session) {
+  let status = `Phase: ${session.phase}`;
+  if (session.phase === 'enroll') {
+    status += `\nWaiting for writers to join with /joinfictioncord.`;
+    status += `\nEnrollment ends in ${fmtDuration(session.enrollEndsAt - now())}`;
+    status += `\nWriters so far:\n${buildWriterList(session.writers) || 'No writers yet.'}`;
+  }
+  if (session.phase === 'collect_prompts') {
+    status += `\nCollecting prompt ideas with /submitprompt.`;
+    status += `\nPrompts so far: ${session.prompts.length}/${VOTE_EMOJIS.length}`;
+    status += `\nPrompt collection ends in ${fmtDuration(session.promptEndsAt - now())}`;
+    status += `\nPrompts submitted:\n${buildPromptList(session.prompts)}`;
+  }
+  if (session.phase === 'vote_prompt') {
+    status += `\nVoting on prompts (react to the poll message).`;
+    status += `\nVoting ends in ${fmtDuration(session.voteEndsAt - now())}`;
+  }
+  if (session.phase === 'writing') {
+    const writerId = session.writers[session.currentWriterIndex];
+    status += `\nWaiting for <@${writerId}> to submit their turn with /submitturn.`;
+    status += `\nTurn ends in ${fmtDuration(session.turnEndsAt - now())}`;
+  }
+  return status;
+}
+
 function getLeaderId(session) {
   return session.leaderId || session.writers[0];
 }
@@ -234,6 +269,7 @@ async function openEnrollment(guildId, channelId, userId, channel) {
     guildId,
     channelId,
     leaderId: userId,
+    startedAt: now(),
     phase: 'enroll',
     enrollEndsAt: hoursFromNow(ENROLL_HOURS),
     writers: [userId],
@@ -635,7 +671,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       await interaction.reply({
         content:
-          'A Fictioncord session is already running. You cannot start a new one until it ends.\n' +
+          `A Fictioncord session is already running (started ${fmtDateTime(existing.startedAt || now())}). ` +
+          'You cannot start a new one until it ends.\n' +
           endHint,
         flags: MessageFlags.Ephemeral,
       });
@@ -652,12 +689,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.commandName === 'joinfictioncord') {
+    const state = loadState();
+    const session = getSession(state, guildId);
+    if (!session) {
+      await interaction.reply({ content: 'No active Fictioncord session.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (session.phase !== 'enroll') {
+      await interaction.reply({
+        content: 'You can’t join right now. Enrollment is closed.\n\n' + buildStatusMessage(session),
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     await interaction.reply({ content: 'Joining enrollment...', flags: MessageFlags.Ephemeral });
     await joinEnrollment(guildId, interaction.user.id, channel);
     return;
   }
 
   if (interaction.commandName === 'submitprompt') {
+    const state = loadState();
+    const session = getSession(state, guildId);
+    if (!session) {
+      await interaction.reply({ content: 'No active Fictioncord session.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (session.phase !== 'collect_prompts') {
+      await interaction.reply({
+        content: 'You can’t submit prompts right now.\n\n' + buildStatusMessage(session),
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     const prompt = interaction.options.getString('prompt', true);
     await interaction.reply({ content: 'Submitting prompt...', flags: MessageFlags.Ephemeral });
     await submitPrompt(guildId, interaction.user.id, prompt, channel);
@@ -665,6 +728,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.commandName === 'submitturn') {
+    const state = loadState();
+    const session = getSession(state, guildId);
+    if (!session) {
+      await interaction.reply({ content: 'No active Fictioncord session.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (session.phase !== 'writing') {
+      await interaction.reply({
+        content: 'You can’t submit a turn right now.\n\n' + buildStatusMessage(session),
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     const modal = new ModalBuilder()
       .setCustomId('submitturn_modal')
       .setTitle('Submit Your Turn');
@@ -684,18 +760,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.commandName === 'theend') {
+    const state = loadState();
+    const session = getSession(state, guildId);
+    if (!session) {
+      await interaction.reply({ content: 'No active Fictioncord session.', flags: MessageFlags.Ephemeral });
+      return;
+    }
     await interaction.reply({ content: 'Ending session...', flags: MessageFlags.Ephemeral });
     await endSession(guildId, interaction.user.id, channel);
     return;
   }
 
   if (interaction.commandName === 'skipstep') {
+    const state = loadState();
+    const session = getSession(state, guildId);
+    if (!session) {
+      await interaction.reply({ content: 'No active Fictioncord session.', flags: MessageFlags.Ephemeral });
+      return;
+    }
     await interaction.reply({ content: 'Skipping step...', flags: MessageFlags.Ephemeral });
     await skipStep(guildId, interaction.user.id, channel);
     return;
   }
 
   if (interaction.commandName === 'resetfictioncord') {
+    const state = loadState();
+    const session = getSession(state, guildId);
+    if (!session) {
+      await interaction.reply({ content: 'No active Fictioncord session.', flags: MessageFlags.Ephemeral });
+      return;
+    }
     await interaction.reply({ content: 'Resetting session...', flags: MessageFlags.Ephemeral });
     await resetSession(guildId, interaction.user.id, isGuildAdmin(interaction), channel);
     return;
@@ -749,30 +843,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.reply({ content: 'No active Fictioncord session.', flags: MessageFlags.Ephemeral });
       return;
     }
-
-    let status = `Phase: ${session.phase}`;
-    if (session.phase === 'enroll') {
-      status += `\nWaiting for writers to join with /joinfictioncord.`;
-      status += `\nEnrollment ends in ${fmtDuration(session.enrollEndsAt - now())}`;
-      status += `\nWriters so far:\n${buildWriterList(session.writers) || 'No writers yet.'}`;
-    }
-    if (session.phase === 'collect_prompts') {
-      status += `\nCollecting prompt ideas with /submitprompt.`;
-      status += `\nPrompts so far: ${session.prompts.length}/${VOTE_EMOJIS.length}`;
-      status += `\nPrompt collection ends in ${fmtDuration(session.promptEndsAt - now())}`;
-      status += `\nPrompts submitted:\n${buildPromptList(session.prompts)}`;
-    }
-    if (session.phase === 'vote_prompt') {
-      status += `\nVoting on prompts (react to the poll message).`;
-      status += `\nVoting ends in ${fmtDuration(session.voteEndsAt - now())}`;
-    }
-    if (session.phase === 'writing') {
-      const writerId = session.writers[session.currentWriterIndex];
-      status += `\nWaiting for <@${writerId}> to submit their turn with /submitturn.`;
-      status += `\nTurn ends in ${fmtDuration(session.turnEndsAt - now())}`;
-    }
-
-    await interaction.reply({ content: status, flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: buildStatusMessage(session), flags: MessageFlags.Ephemeral });
   }
 });
 
@@ -790,4 +861,3 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(TOKEN);
-
