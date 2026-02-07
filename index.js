@@ -341,15 +341,7 @@ async function submitPrompt(guildId, userId, prompt, channel) {
 async function submitTurn(guildId, userId, text, channel) {
   const state = loadState();
   const session = getSession(state, guildId);
-  if (!session || session.phase !== 'writing') {
-    await announce(channel, 'Story writing is not active.');
-    return;
-  }
   const currentWriterId = session.writers[session.currentWriterIndex];
-  if (currentWriterId !== userId) {
-    await announce(channel, `It is not your turn. Current writer is <@${currentWriterId}>.`);
-    return;
-  }
   session.story.push({ userId, text, timestamp: now() });
 
   const storyChannel = await getStoryChannel(session, channel);
@@ -392,6 +384,15 @@ async function endSession(guildId, userId, channel) {
   const storyText = buildStory(session.story);
   await announce(channel, 'The story has ended.');
   await announce(channel, `Final story:\n\n${storyText}`);
+
+  if (session.threadId) {
+    const thread = await client.channels.fetch(session.threadId).catch(() => null);
+    if (thread && thread.isThread()) {
+      await thread.setLocked(true).catch(() => {});
+      await thread.setArchived(true).catch(() => {});
+    }
+  }
+
   clearSession(state, guildId);
 }
 
@@ -552,6 +553,14 @@ async function resetSession(guildId, userId, isAdmin, channel) {
   if (!isAdmin && leaderId !== userId) {
     await announce(channel, `Only the leader or a server admin can reset. Leader is <@${leaderId}>.`);
     return;
+  }
+
+  if (session.threadId) {
+    const thread = await client.channels.fetch(session.threadId).catch(() => null);
+    if (thread && thread.isThread()) {
+      await thread.setLocked(true).catch(() => {});
+      await thread.setArchived(true).catch(() => {});
+    }
   }
 
   clearSession(state, guildId);
@@ -855,9 +864,46 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const channel = interaction.channel;
   if (!guildId || !channel) return;
 
+  const state = loadState();
+  const session = getSession(state, guildId);
+  if (!session || session.phase !== 'writing') {
+    await interaction.reply({
+      content: 'You can’t submit a turn right now.\n\n' + (session ? buildStatusMessage(session) : ''),
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const currentWriterId = session.writers[session.currentWriterIndex];
+  if (currentWriterId !== interaction.user.id) {
+    await interaction.reply({
+      content: `It is not your turn. Current writer is <@${currentWriterId}>.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   const text = interaction.fields.getTextInputValue('submitturn_text');
   await interaction.reply({ content: 'Submitting turn...', flags: MessageFlags.Ephemeral });
   await submitTurn(guildId, interaction.user.id, text, channel);
+});
+
+client.on(Events.MessageCreate, async (message) => {
+  if (message.author.bot) return;
+  if (!message.guildId || !message.channel?.isThread?.()) return;
+
+  const state = loadState();
+  const session = getSession(state, message.guildId);
+  if (!session || !session.threadId) return;
+  if (message.channel.id !== session.threadId) return;
+
+  try {
+    await message.author.send(
+      'Only writers on their turn can add to the story, and they must use /submitturn.'
+    );
+  } catch {
+    // Ignore DM failures (e.g., user has DMs closed).
+  }
 });
 
 client.login(TOKEN);
