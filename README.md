@@ -10,7 +10,7 @@ A Fictioncord session follows this flow:
 4. Prompt collection opens for 24 hours via `/submitprompt`.
 5. The bot posts all prompts and starts a 24-hour reaction vote.
 6. The top-voted prompt is selected.
-7. Writer 1 gets 25 hours to submit the first turn with `/submitturn`.
+7. Writer 1 gets 24 hours to submit the first turn with `/submitturn`.
 8. Every 24 hours, the bot advances to the next writer.
 9. The leader (starter) can end the session at any time with `/theend`, and the bot publishes the story.
 
