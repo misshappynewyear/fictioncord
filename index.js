@@ -923,7 +923,27 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.channel.id !== session.threadId) return;
 
   try {
-    const original = message.content?.trim() || '(no text)';
+    const parts = [];
+    const text = message.content?.trim();
+    if (text) parts.push(text);
+
+    if (message.attachments?.size) {
+      const files = [...message.attachments.values()]
+        .map((a) => a.url || a.name)
+        .filter(Boolean)
+        .join('\n');
+      if (files) parts.push(`Attachments:\n${files}`);
+    }
+
+    if (message.stickers?.size) {
+      const stickers = [...message.stickers.values()]
+        .map((s) => s.name)
+        .filter(Boolean)
+        .join(', ');
+      if (stickers) parts.push(`Stickers: ${stickers}`);
+    }
+
+    const original = parts.length ? parts.join('\n\n') : '(no text)';
     await message.delete();
     const preview = original.length > 800 ? `${original.slice(0, 800)}…` : original;
     await message.author.send(
@@ -939,5 +959,6 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 client.login(TOKEN);
+
 
 
