@@ -664,6 +664,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const guildId = interaction.guildId;
   const channel = interaction.channel;
   if (!guildId || !channel) return;
+  if (channel.name !== 'fictioncord') {
+    await interaction.reply({
+      content: 'Please use the `#fictioncord` channel to run Fictioncord commands.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
   if (interaction.commandName === 'startfictioncord') {
     const state = loadState();
@@ -863,6 +870,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const guildId = interaction.guildId;
   const channel = interaction.channel;
   if (!guildId || !channel) return;
+  if (channel.name !== 'fictioncord') {
+    await interaction.reply({
+      content: 'Please use the `#fictioncord` channel to submit your turn.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
   const state = loadState();
   const session = getSession(state, guildId);
@@ -907,3 +921,4 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 client.login(TOKEN);
+
