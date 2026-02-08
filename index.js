@@ -18,6 +18,7 @@ const {
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID = process.env.DISCORD_GUILD_ID; // optional, but recommended for faster command updates
+const GUILD_IDS = process.env.DISCORD_GUILD_IDS; // optional, comma-separated list
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in environment.');
@@ -151,7 +152,17 @@ async function registerCommands() {
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-  if (GUILD_ID) {
+  if (GUILD_IDS) {
+    const ids = GUILD_IDS.split(',')
+      .map((id) => id.trim())
+      .filter(Boolean);
+    for (const id of ids) {
+      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, id), {
+        body: commands,
+      });
+    }
+    console.log(`Registered guild commands for ${ids.length} guild(s).`);
+  } else if (GUILD_ID) {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
       body: commands,
     });
@@ -921,4 +932,5 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 client.login(TOKEN);
+
 
