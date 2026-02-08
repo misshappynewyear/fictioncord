@@ -923,11 +923,18 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.channel.id !== session.threadId) return;
 
   try {
+    const original = message.content?.trim() || '(no text)';
+    await message.delete();
+    const preview = original.length > 800 ? `${original.slice(0, 800)}…` : original;
     await message.author.send(
-      'Only writers on their turn can add to the story, and they must use /submitturn.'
+      'You can’t write in the story thread. Only writers on their turn can add to the story using /submitturn.\n\n' +
+        'Your message (copy it):\n' +
+        '```\n' +
+        preview +
+        '\n```'
     );
   } catch {
-    // Ignore DM failures (e.g., user has DMs closed).
+    // Ignore failures (e.g., missing permissions).
   }
 });
 
