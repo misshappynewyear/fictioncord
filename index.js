@@ -21,7 +21,7 @@ const GUILD_ID = process.env.DISCORD_GUILD_ID; // optional, but recommended for 
 const GUILD_IDS = process.env.DISCORD_GUILD_IDS; // optional, comma-separated list
 
 if (!TOKEN || !CLIENT_ID) {
-  console.error('Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in environment.');
+  console.error('Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in this environment.');
   process.exit(1);
 }
 
