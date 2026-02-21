@@ -317,16 +317,15 @@ async function joinEnrollment(guildId, userId, channel) {
   const state = loadState();
   const session = getSession(state, guildId);
   if (!session || session.phase !== 'enroll') {
-    await announce(channel, 'There is no enrollment open right now.');
-    return;
+    return 'not_open';
   }
   if (session.writers.includes(userId)) {
-    await announce(channel, 'You are already enrolled.');
-    return;
+    return 'already';
   }
   session.writers.push(userId);
   setSession(state, guildId, session);
   await announce(channel, `<@${userId}> is now a writer for this session.`);
+  return 'joined';
 }
 
 async function submitPrompt(guildId, userId, prompt, channel) {
@@ -395,6 +394,10 @@ async function endSession(guildId, userId, channel) {
   const storyText = buildStory(session.story);
   await announce(channel, 'The story has ended.');
   await announce(channel, `Final story:\n\n${storyText}`);
+  if (session.story.length > 0 && session.threadId) {
+    const threadUrl = `https://discord.com/channels/${session.guildId}/${session.threadId}`;
+    await announce(channel, `Story thread: ${threadUrl}`);
+  }
 
   if (session.threadId) {
     const thread = await client.channels.fetch(session.threadId).catch(() => null);
@@ -729,8 +732,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       return;
     }
-    await interaction.reply({ content: 'Joining enrollment...', flags: MessageFlags.Ephemeral });
-    await joinEnrollment(guildId, interaction.user.id, channel);
+    const result = await joinEnrollment(guildId, interaction.user.id, channel);
+    if (result === 'already') {
+      await interaction.reply({ content: 'You are already enrolled.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (result === 'not_open') {
+      await interaction.reply({ content: 'There is no enrollment open right now.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await interaction.reply({ content: 'You are enrolled as a writer.', flags: MessageFlags.Ephemeral });
     return;
   }
 
