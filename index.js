@@ -38,9 +38,6 @@ const THREAD_AUTO_ARCHIVE_MINUTES = 1440;
 const MAX_PROMPT_LENGTH = 300;
 const MAX_TURN_LENGTH = 1500;
 
-/**
- * Valid Discord reaction emojis for prompt voting.
- */
 const VOTE_EMOJIS = [
   '1️⃣',
   '2️⃣',
@@ -65,6 +62,16 @@ const VOTE_EMOJIS = [
   '🇰',
   '🇱',
 ];
+
+function loadState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+  } catch {
+    return { sessions: {} };
+  }
+}
+
+let STATE = loadState();
 
 const client = new Client({
   intents: [
@@ -98,35 +105,27 @@ function fmtDateTime(ms) {
   });
 }
 
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
-  } catch {
-    return { sessions: {} };
-  }
-}
-
 /**
  * Write state atomically to reduce the chance of a corrupted file.
  */
-function saveState(state) {
+function saveState() {
   const tempPath = `${STATE_PATH}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(state, null, 2), 'utf8');
+  fs.writeFileSync(tempPath, JSON.stringify(STATE, null, 2), 'utf8');
   fs.renameSync(tempPath, STATE_PATH);
 }
 
-function getSession(state, guildId) {
-  return state.sessions[guildId] || null;
+function getSession(guildId) {
+  return STATE.sessions[guildId] || null;
 }
 
-function setSession(state, guildId, session) {
-  state.sessions[guildId] = session;
-  saveState(state);
+function setSession(guildId, session) {
+  STATE.sessions[guildId] = session;
+  saveState();
 }
 
-function clearSession(state, guildId) {
-  delete state.sessions[guildId];
-  saveState(state);
+function clearSession(guildId) {
+  delete STATE.sessions[guildId];
+  saveState();
 }
 
 function getLeaderId(session) {
@@ -384,8 +383,7 @@ async function registerCommands() {
 }
 
 async function openEnrollment(guildId, channelId, userId, channel) {
-  const state = loadState();
-  const existing = getSession(state, guildId);
+  const existing = getSession(guildId);
 
   if (existing) {
     return false;
@@ -397,7 +395,7 @@ async function openEnrollment(guildId, channelId, userId, channel) {
     leaderId: userId,
   });
 
-  setSession(state, guildId, session);
+  setSession(guildId, session);
 
   await announce(
     channel,
@@ -411,8 +409,7 @@ async function openEnrollment(guildId, channelId, userId, channel) {
 }
 
 async function joinEnrollment(guildId, userId, channel) {
-  const state = loadState();
-  const session = getSession(state, guildId);
+  const session = getSession(guildId);
 
   if (!session || session.phase !== 'enroll') {
     return 'not_open';
@@ -423,15 +420,14 @@ async function joinEnrollment(guildId, userId, channel) {
   }
 
   session.writers.push(userId);
-  setSession(state, guildId, session);
+  setSession(guildId, session);
 
   await announce(channel, `<@${userId}> is now a writer for this session.`);
   return 'joined';
 }
 
 async function submitPrompt(guildId, userId, promptText, channel) {
-  const state = loadState();
-  const session = getSession(state, guildId);
+  const session = getSession(guildId);
 
   if (!session || session.phase !== 'collect_prompts') {
     await announce(channel, 'Prompt collection is not open.');
@@ -453,14 +449,13 @@ async function submitPrompt(guildId, userId, promptText, channel) {
     text: promptText,
   });
 
-  setSession(state, guildId, session);
+  setSession(guildId, session);
 
   await announce(channel, `Prompt received from <@${userId}>: "${promptText}"`);
 }
 
 async function submitTurn(guildId, userId, text, channel) {
-  const state = loadState();
-  const session = getSession(state, guildId);
+  const session = getSession(guildId);
 
   if (!session || session.phase !== 'writing') {
     await announce(channel, 'There is no active writing turn right now.');
@@ -489,7 +484,7 @@ async function submitTurn(guildId, userId, text, channel) {
   session.reminders.turn12 = false;
   session.reminders.turn1 = false;
 
-  setSession(state, guildId, session);
+  setSession(guildId, session);
 
   const nextWriterId = session.writers[session.currentWriterIndex];
 
@@ -507,13 +502,13 @@ async function announceWriters(session, channel) {
   );
 }
 
-async function startPromptCollection(session, channel, state) {
+async function startPromptCollection(session, channel) {
   session.phase = 'collect_prompts';
   session.promptEndsAt = hoursFromNow(PROMPT_HOURS);
   session.reminders.prompt12 = false;
   session.reminders.prompt1 = false;
 
-  setSession(state, session.guildId, session);
+  setSession(session.guildId, session);
 
   await announce(
     channel,
@@ -522,13 +517,13 @@ async function startPromptCollection(session, channel, state) {
   );
 }
 
-async function startVoting(session, channel, state) {
+async function startVoting(session, channel) {
   session.phase = 'vote_prompt';
   session.voteEndsAt = hoursFromNow(VOTE_HOURS);
   session.reminders.vote12 = false;
   session.reminders.vote1 = false;
 
-  setSession(state, session.guildId, session);
+  setSession(session.guildId, session);
 
   const promptLines = session.prompts.map(
     (prompt, index) => `${VOTE_EMOJIS[index]} ${prompt.text} (by <@${prompt.userId}>)`
@@ -547,10 +542,10 @@ async function startVoting(session, channel, state) {
   }
 
   session.voteMessageId = message.id;
-  setSession(state, session.guildId, session);
+  setSession(session.guildId, session);
 }
 
-async function selectPrompt(session, channel, state) {
+async function selectPrompt(session, channel) {
   let selectedIndex = 0;
 
   try {
@@ -592,7 +587,7 @@ async function selectPrompt(session, channel, state) {
   const prompt = session.prompts[selectedIndex];
   const thread = await createStoryThread(session, channel, prompt.text);
 
-  setSession(state, session.guildId, session);
+  setSession(session.guildId, session);
 
   const firstWriterId = session.writers[0];
 
@@ -606,13 +601,13 @@ async function selectPrompt(session, channel, state) {
   );
 }
 
-async function advanceTurn(session, channel, state) {
+async function advanceTurn(session, channel) {
   session.currentWriterIndex = (session.currentWriterIndex + 1) % session.writers.length;
   session.turnEndsAt = hoursFromNow(TURN_HOURS);
   session.reminders.turn12 = false;
   session.reminders.turn1 = false;
 
-  setSession(state, session.guildId, session);
+  setSession(session.guildId, session);
 
   const nextWriterId = session.writers[session.currentWriterIndex];
 
@@ -624,8 +619,7 @@ async function advanceTurn(session, channel, state) {
 }
 
 async function endSession(guildId, userId, channel) {
-  const state = loadState();
-  const session = getSession(state, guildId);
+  const session = getSession(guildId);
 
   if (!session) {
     await announce(channel, 'No active Fictioncord session.');
@@ -663,12 +657,11 @@ async function endSession(guildId, userId, channel) {
     await announce(channel, 'The story thread could not be found.');
   }
 
-  clearSession(state, guildId);
+  clearSession(guildId);
 }
 
 async function skipStep(guildId, userId, channel) {
-  const state = loadState();
-  const session = getSession(state, guildId);
+  const session = getSession(guildId);
 
   if (!session) {
     await announce(channel, 'No active Fictioncord session.');
@@ -685,33 +678,33 @@ async function skipStep(guildId, userId, channel) {
   if (session.phase === 'enroll') {
     if (!session.writers.length) {
       await announce(channel, 'Enrollment closed. No writers joined. Session ended.');
-      clearSession(state, session.guildId);
+      clearSession(session.guildId);
       return;
     }
 
     await announceWriters(session, channel);
-    await startPromptCollection(session, channel, state);
+    await startPromptCollection(session, channel);
     return;
   }
 
   if (session.phase === 'collect_prompts') {
     if (!session.prompts.length) {
       await announce(channel, 'Prompt collection ended with no prompts. Session ended.');
-      clearSession(state, session.guildId);
+      clearSession(session.guildId);
       return;
     }
 
-    await startVoting(session, channel, state);
+    await startVoting(session, channel);
     return;
   }
 
   if (session.phase === 'vote_prompt') {
-    await selectPrompt(session, channel, state);
+    await selectPrompt(session, channel);
     return;
   }
 
   if (session.phase === 'writing') {
-    await advanceTurn(session, channel, state);
+    await advanceTurn(session, channel);
     return;
   }
 
@@ -719,8 +712,7 @@ async function skipStep(guildId, userId, channel) {
 }
 
 async function resetSession(guildId, userId, isAdmin, channel) {
-  const state = loadState();
-  const session = getSession(state, guildId);
+  const session = getSession(guildId);
 
   if (!session) {
     await announce(channel, 'No active Fictioncord session.');
@@ -744,7 +736,7 @@ async function resetSession(guildId, userId, isAdmin, channel) {
     await thread.setArchived(true).catch(() => {});
   }
 
-  clearSession(state, guildId);
+  clearSession(guildId);
   await announce(channel, 'Fictioncord session reset.');
 }
 
@@ -828,8 +820,7 @@ async function maybeSendReminder(session, channel) {
 }
 
 async function processSession(session) {
-  const state = loadState();
-  const freshSession = getSession(state, session.guildId);
+  const freshSession = getSession(session.guildId);
 
   if (!freshSession) {
     return;
@@ -844,39 +835,39 @@ async function processSession(session) {
   const reminderSent = await maybeSendReminder(freshSession, channel);
 
   if (reminderSent) {
-    setSession(state, freshSession.guildId, freshSession);
+    setSession(freshSession.guildId, freshSession);
   }
 
   if (freshSession.phase === 'enroll' && now() >= freshSession.enrollEndsAt) {
     if (!freshSession.writers.length) {
       await announce(channel, 'Enrollment closed. No writers joined. Session ended.');
-      clearSession(state, freshSession.guildId);
+      clearSession(freshSession.guildId);
       return;
     }
 
     await announceWriters(freshSession, channel);
-    await startPromptCollection(freshSession, channel, state);
+    await startPromptCollection(freshSession, channel);
     return;
   }
 
   if (freshSession.phase === 'collect_prompts' && now() >= freshSession.promptEndsAt) {
     if (!freshSession.prompts.length) {
       await announce(channel, 'Prompt collection ended with no prompts. Session ended.');
-      clearSession(state, freshSession.guildId);
+      clearSession(freshSession.guildId);
       return;
     }
 
-    await startVoting(freshSession, channel, state);
+    await startVoting(freshSession, channel);
     return;
   }
 
   if (freshSession.phase === 'vote_prompt' && now() >= freshSession.voteEndsAt) {
-    await selectPrompt(freshSession, channel, state);
+    await selectPrompt(freshSession, channel);
     return;
   }
 
   if (freshSession.phase === 'writing' && now() >= freshSession.turnEndsAt) {
-    await advanceTurn(freshSession, channel, state);
+    await advanceTurn(freshSession, channel);
   }
 }
 
@@ -983,8 +974,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'submitturn') {
-        const state = loadState();
-        const session = getSession(state, interaction.guildId);
+        const session = getSession(interaction.guildId);
 
         if (!session || session.phase !== 'writing') {
           await interaction.reply({
@@ -1067,8 +1057,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'statusfictioncord') {
-        const state = loadState();
-        const session = getSession(state, interaction.guildId);
+        const session = getSession(interaction.guildId);
 
         if (!session) {
           await interaction.reply({
@@ -1137,8 +1126,7 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    const state = loadState();
-    const session = getSession(state, message.guild.id);
+    const session = getSession(message.guild.id);
 
     if (!session) {
       return;
@@ -1160,8 +1148,7 @@ client.on(Events.MessageCreate, async (message) => {
 
 setInterval(async () => {
   try {
-    const state = loadState();
-    const sessions = Object.values(state.sessions);
+    const sessions = Object.values(STATE.sessions);
 
     for (const session of sessions) {
       await processSession(session);
@@ -1171,8 +1158,17 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
+setInterval(() => {
+  try {
+    saveState();
+  } catch (error) {
+    console.error('Autosave error:', error);
+  }
+}, 60 * 1000);
+
 (async () => {
   try {
+    STATE = loadState();
     await registerCommands();
     await client.login(TOKEN);
   } catch (error) {
@@ -1183,10 +1179,6 @@ setInterval(async () => {
 
 const PORT = process.env.PORT || 10000;
 
-/**
- * Minimal HTTP server required for Render Web Services.
- * This allows Render to detect an open port and keep the service alive.
- */
 http
   .createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
