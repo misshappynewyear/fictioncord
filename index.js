@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const {
   Client,
   GatewayIntentBits,
@@ -13,7 +14,6 @@ const {
   TextInputStyle,
   ActionRowBuilder,
   Events,
-  ChannelType,
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -39,8 +39,7 @@ const MAX_PROMPT_LENGTH = 300;
 const MAX_TURN_LENGTH = 1500;
 
 /**
- * These are all valid Discord reaction emojis.
- * The old array was broken after 9 entries.
+ * Valid Discord reaction emojis for prompt voting.
  */
 const VOTE_EMOJIS = [
   '1️⃣',
@@ -68,7 +67,11 @@ const VOTE_EMOJIS = [
 ];
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 function now() {
@@ -242,9 +245,11 @@ async function createStoryThread(session, channel, promptText) {
 
   await safeSend(thread, `Selected prompt:\n${promptText}`);
 
-  const guild = channel.guild || (await client.guilds.fetch(channel.guildId).catch(() => null));
+  const guild =
+    channel.guild || (await client.guilds.fetch(channel.guildId).catch(() => null));
   const everyoneRole = guild?.roles?.everyone;
-  const botMember = guild?.members?.me || (guild ? await guild.members.fetchMe().catch(() => null) : null);
+  const botMember =
+    guild?.members?.me || (guild ? await guild.members.fetchMe().catch(() => null) : null);
 
   if (thread.permissionOverwrites) {
     if (everyoneRole) {
@@ -263,6 +268,8 @@ async function createStoryThread(session, channel, promptText) {
   }
 
   session.threadId = thread.id;
+  session.lockedStoryThread = true;
+
   return thread;
 }
 
@@ -285,6 +292,7 @@ function createSession({ guildId, channelId, leaderId }) {
     selectedPromptIndex: null,
     selectedPromptText: null,
     threadId: null,
+    lockedStoryThread: false,
     reminders: {
       enroll12: false,
       enroll1: false,
@@ -474,10 +482,7 @@ async function submitTurn(guildId, userId, text, channel) {
 
   const storyChannel = await getStoryChannel(session, channel);
 
-  await safeSend(
-    storyChannel,
-    `Turn ${session.story.length} by <@${userId}>:\n${text}`
-  );
+  await safeSend(storyChannel, `Turn ${session.story.length} by <@${userId}>:\n${text}`);
 
   session.currentWriterIndex = (session.currentWriterIndex + 1) % session.writers.length;
   session.turnEndsAt = hoursFromNow(TURN_HOURS);
@@ -496,7 +501,10 @@ async function submitTurn(guildId, userId, text, channel) {
 }
 
 async function announceWriters(session, channel) {
-  await announce(channel, `Enrollment closed.\nWriters in order:\n${buildWriterList(session.writers)}`);
+  await announce(
+    channel,
+    `Enrollment closed.\nWriters in order:\n${buildWriterList(session.writers)}`
+  );
 }
 
 async function startPromptCollection(session, channel, state) {
@@ -579,6 +587,7 @@ async function selectPrompt(session, channel, state) {
   session.reminders.turn12 = false;
   session.reminders.turn1 = false;
   session.threadId = null;
+  session.lockedStoryThread = false;
 
   const prompt = session.prompts[selectedIndex];
   const thread = await createStoryThread(session, channel, prompt.text);
@@ -798,13 +807,19 @@ async function maybeSendReminder(session, channel) {
 
     if (hoursLeft <= 12 && !session.reminders.turn12) {
       session.reminders.turn12 = true;
-      await announce(channel, `Reminder: 12 hours left for <@${currentWriterId}> to submit their turn.`);
+      await announce(
+        channel,
+        `Reminder: 12 hours left for <@${currentWriterId}> to submit their turn.`
+      );
       return true;
     }
 
     if (hoursLeft <= 1 && !session.reminders.turn1) {
       session.reminders.turn1 = true;
-      await announce(channel, `Reminder: 1 hour left for <@${currentWriterId}> to submit their turn.`);
+      await announce(
+        channel,
+        `Reminder: 1 hour left for <@${currentWriterId}> to submit their turn.`
+      );
       return true;
     }
   }
@@ -882,6 +897,7 @@ function createRulesMessage() {
     `Notes:\n` +
     `- Only the current writer can submit a turn.\n` +
     `- Prompt voting supports up to ${VOTE_EMOJIS.length} prompts.\n` +
+    `- The story thread is bot-only. User messages there are deleted.\n` +
     `- The leader can skip steps with /skipstep.\n` +
     `- The leader or a server admin can reset the session with /resetfictioncord.`
   );
@@ -1089,17 +1105,56 @@ client.on(Events.InteractionCreate, async (interaction) => {
     console.error('Interaction error:', error);
 
     if (interaction.deferred || interaction.replied) {
-      await interaction.followUp({
-        content: 'Something went wrong while processing that action.',
-        ephemeral: true,
-      }).catch(() => {});
+      await interaction
+        .followUp({
+          content: 'Something went wrong while processing that action.',
+          ephemeral: true,
+        })
+        .catch(() => {});
       return;
     }
 
-    await interaction.reply({
-      content: 'Something went wrong while processing that action.',
-      ephemeral: true,
-    }).catch(() => {});
+    await interaction
+      .reply({
+        content: 'Something went wrong while processing that action.',
+        ephemeral: true,
+      })
+      .catch(() => {});
+  }
+});
+
+/**
+ * Delete any user message posted directly in the active Fictioncord story thread.
+ * No warning is sent back to avoid polluting the thread.
+ */
+client.on(Events.MessageCreate, async (message) => {
+  try {
+    if (!message.guild) {
+      return;
+    }
+
+    if (message.author.bot) {
+      return;
+    }
+
+    const state = loadState();
+    const session = getSession(state, message.guild.id);
+
+    if (!session) {
+      return;
+    }
+
+    if (!session.threadId || !session.lockedStoryThread) {
+      return;
+    }
+
+    if (message.channel.id !== session.threadId) {
+      return;
+    }
+
+    await message.delete().catch(() => {});
+  } catch (error) {
+    console.error('Thread moderation error:', error);
   }
 });
 
@@ -1125,8 +1180,6 @@ setInterval(async () => {
     process.exit(1);
   }
 })();
-
-const http = require('http');
 
 const PORT = process.env.PORT || 10000;
 
