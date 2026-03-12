@@ -1,16 +1,23 @@
 {
   "name": "fictioncord",
-  "version": "1.0.0",
-  "description": "A Discord bot that runs collaborative, turn-based story sessions in a server.",
+  "version": "2.0.0",
+  "description": "A Discord bot for collaborative, turn-based story sessions.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
-  "keywords": [],
+  "keywords": [
+    "discord",
+    "bot",
+    "fiction",
+    "story",
+    "collaborative-writing"
+  ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
-    "discord.js": "^14.25.1",
-    "dotenv": "^17.2.4"
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
   }
 }
