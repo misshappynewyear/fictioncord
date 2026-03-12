@@ -21,6 +21,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const GUILD_IDS = process.env.DISCORD_GUILD_IDS;
+const BACKUP_CHANNEL_ID = process.env.DISCORD_BACKUP_CHANNEL_ID;
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in environment.');
@@ -127,6 +128,83 @@ function setSession(guildId, session) {
 function clearSession(guildId) {
   delete STATE.sessions[guildId];
   saveState();
+}
+
+async function backupStateToDiscord(reason = 'manual') {
+  try {
+    if (!BACKUP_CHANNEL_ID) {
+      return;
+    }
+
+    const channel = await client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+    if (!channel) {
+      return;
+    }
+
+    const buffer = Buffer.from(JSON.stringify(STATE, null, 2), 'utf8');
+
+    await channel.send({
+      content: `Fictioncord state backup (${reason}) - ${new Date().toISOString()}`,
+      files: [
+        {
+          attachment: buffer,
+          name: 'state.json',
+        },
+      ],
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    console.error('Backup to Discord failed:', error);
+  }
+}
+
+async function restoreStateFromDiscord() {
+  try {
+    if (!BACKUP_CHANNEL_ID) {
+      return false;
+    }
+
+    const channel = await client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+    if (!channel) {
+      return false;
+    }
+
+    const messages = await channel.messages.fetch({ limit: 20 });
+    const backupMessage = messages.find((message) => {
+      const attachment = message.attachments.first();
+      return attachment && attachment.name === 'state.json';
+    });
+
+    if (!backupMessage) {
+      return false;
+    }
+
+    const attachment = backupMessage.attachments.first();
+    if (!attachment) {
+      return false;
+    }
+
+    const response = await fetch(attachment.url);
+    if (!response.ok) {
+      return false;
+    }
+
+    const text = await response.text();
+    const parsed = JSON.parse(text);
+
+    if (!parsed || typeof parsed !== 'object' || !parsed.sessions) {
+      return false;
+    }
+
+    STATE = parsed;
+    saveState();
+
+    console.log('State restored from Discord backup.');
+    return true;
+  } catch (error) {
+    console.error('Restore from Discord failed:', error);
+    return false;
+  }
 }
 
 function getLeaderId(session) {
@@ -919,6 +997,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
+        await backupStateToDiscord('startfictioncord');
         await interaction.editReply('Fictioncord session started.');
         return;
       }
@@ -942,6 +1021,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
+        await backupStateToDiscord('joinfictioncord');
         await interaction.editReply('You joined the Fictioncord session as a writer.');
         return;
       }
@@ -958,6 +1038,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           interaction.channel
         );
 
+        await backupStateToDiscord('submitprompt');
         await interaction.editReply('Prompt submission processed.');
         return;
       }
@@ -1006,6 +1087,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         await endSession(interaction.guildId, interaction.user.id, interaction.channel);
+        await backupStateToDiscord('theend');
         await interaction.editReply('End session request processed.');
         return;
       }
@@ -1014,6 +1096,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         await skipStep(interaction.guildId, interaction.user.id, interaction.channel);
+        await backupStateToDiscord('skipstep');
         await interaction.editReply('Skip request processed.');
         return;
       }
@@ -1028,6 +1111,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           interaction.channel
         );
 
+        await backupStateToDiscord('resetfictioncord');
         await interaction.editReply('Reset request processed.');
         return;
       }
@@ -1066,6 +1150,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       await submitTurn(interaction.guildId, interaction.user.id, turnText, interaction.channel);
 
+      await backupStateToDiscord('submitturn');
       await interaction.editReply('Turn submission processed.');
     }
   } catch (error) {
@@ -1149,6 +1234,11 @@ setInterval(() => {
     STATE = loadState();
     await registerCommands();
     await client.login(TOKEN);
+
+    if (!STATE.sessions || Object.keys(STATE.sessions).length === 0) {
+      console.log('Local state empty, attempting restore from Discord backup...');
+      await restoreStateFromDiscord();
+    }
   } catch (error) {
     console.error('Startup error:', error);
     process.exit(1);
