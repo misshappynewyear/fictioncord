@@ -14,6 +14,7 @@ const {
   TextInputStyle,
   ActionRowBuilder,
   Events,
+  MessageFlags,
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -904,6 +905,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const { commandName } = interaction;
 
       if (commandName === 'startfictioncord') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
         const created = await openEnrollment(
           interaction.guildId,
           interaction.channelId,
@@ -912,21 +915,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
 
         if (!created) {
-          await interaction.reply({
-            content: 'There is already an active Fictioncord session in this server.',
-            ephemeral: true,
-          });
+          await interaction.editReply('There is already an active Fictioncord session in this server.');
           return;
         }
 
-        await interaction.reply({
-          content: 'Fictioncord session started.',
-          ephemeral: true,
-        });
+        await interaction.editReply('Fictioncord session started.');
         return;
       }
 
       if (commandName === 'joinfictioncord') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
         const result = await joinEnrollment(
           interaction.guildId,
           interaction.user.id,
@@ -934,29 +933,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
 
         if (result === 'not_open') {
-          await interaction.reply({
-            content: 'Enrollment is not open.',
-            ephemeral: true,
-          });
+          await interaction.editReply('Enrollment is not open.');
           return;
         }
 
         if (result === 'already') {
-          await interaction.reply({
-            content: 'You are already enrolled as a writer.',
-            ephemeral: true,
-          });
+          await interaction.editReply('You are already enrolled as a writer.');
           return;
         }
 
-        await interaction.reply({
-          content: 'You joined the Fictioncord session as a writer.',
-          ephemeral: true,
-        });
+        await interaction.editReply('You joined the Fictioncord session as a writer.');
         return;
       }
 
       if (commandName === 'submitprompt') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
         const promptText = interaction.options.getString('prompt', true);
 
         await submitPrompt(
@@ -966,10 +958,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           interaction.channel
         );
 
-        await interaction.reply({
-          content: 'Prompt submission processed.',
-          ephemeral: true,
-        });
+        await interaction.editReply('Prompt submission processed.');
         return;
       }
 
@@ -979,7 +968,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!session || session.phase !== 'writing') {
           await interaction.reply({
             content: 'There is no active writing turn right now.',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -989,7 +978,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (currentWriterId !== interaction.user.id) {
           await interaction.reply({
             content: `It is not your turn. Current writer: <@${currentWriterId}>.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -1014,26 +1003,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'theend') {
-        await endSession(interaction.guildId, interaction.user.id, interaction.channel);
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        await interaction.reply({
-          content: 'End session request processed.',
-          ephemeral: true,
-        });
+        await endSession(interaction.guildId, interaction.user.id, interaction.channel);
+        await interaction.editReply('End session request processed.');
         return;
       }
 
       if (commandName === 'skipstep') {
-        await skipStep(interaction.guildId, interaction.user.id, interaction.channel);
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        await interaction.reply({
-          content: 'Skip request processed.',
-          ephemeral: true,
-        });
+        await skipStep(interaction.guildId, interaction.user.id, interaction.channel);
+        await interaction.editReply('Skip request processed.');
         return;
       }
 
       if (commandName === 'resetfictioncord') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
         await resetSession(
           interaction.guildId,
           interaction.user.id,
@@ -1041,36 +1028,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
           interaction.channel
         );
 
-        await interaction.reply({
-          content: 'Reset request processed.',
-          ephemeral: true,
-        });
+        await interaction.editReply('Reset request processed.');
         return;
       }
 
       if (commandName === 'rulesfictioncord') {
-        await interaction.reply({
-          content: createRulesMessage(),
-          ephemeral: true,
-        });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await interaction.editReply(createRulesMessage());
         return;
       }
 
       if (commandName === 'statusfictioncord') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
         const session = getSession(interaction.guildId);
 
         if (!session) {
-          await interaction.reply({
-            content: 'No active Fictioncord session.',
-            ephemeral: true,
-          });
+          await interaction.editReply('No active Fictioncord session.');
           return;
         }
 
-        await interaction.reply({
-          content: buildStatusMessage(session),
-          ephemeral: true,
-        });
+        await interaction.editReply(buildStatusMessage(session));
+        return;
       }
 
       return;
@@ -1081,14 +1060,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
       const turnText = interaction.fields.getTextInputValue('turn_text');
 
       await submitTurn(interaction.guildId, interaction.user.id, turnText, interaction.channel);
 
-      await interaction.reply({
-        content: 'Turn submission processed.',
-        ephemeral: true,
-      });
+      await interaction.editReply('Turn submission processed.');
     }
   } catch (error) {
     console.error('Interaction error:', error);
@@ -1097,7 +1075,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction
         .followUp({
           content: 'Something went wrong while processing that action.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         })
         .catch(() => {});
       return;
@@ -1106,7 +1084,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction
       .reply({
         content: 'Something went wrong while processing that action.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       })
       .catch(() => {});
   }
