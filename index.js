@@ -1126,4 +1126,19 @@ setInterval(async () => {
   }
 })();
 
+const http = require('http');
 
+const PORT = process.env.PORT || 10000;
+
+/**
+ * Minimal HTTP server required for Render Web Services.
+ * This allows Render to detect an open port and keep the service alive.
+ */
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Fictioncord bot is running.');
+  })
+  .listen(PORT, '0.0.0.0', () => {
+    console.log(`HTTP server listening on port ${PORT}`);
+  });
