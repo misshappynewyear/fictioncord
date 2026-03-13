@@ -107,6 +107,10 @@ function fmtDateTime(ms) {
   });
 }
 
+function hasActiveSessions() {
+  return Boolean(STATE.sessions && Object.keys(STATE.sessions).length > 0);
+}
+
 /**
  * Write state atomically to reduce the chance of a corrupted file.
  */
@@ -130,20 +134,49 @@ function clearSession(guildId) {
   saveState();
 }
 
-async function backupStateToDiscord(reason = 'manual') {
-  try {
-    if (!BACKUP_CHANNEL_ID) {
-      return;
-    }
+async function getBackupChannel() {
+  if (!BACKUP_CHANNEL_ID) {
+    return null;
+  }
 
-    const channel = await client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+  return client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+}
+
+async function clearBackupChannel() {
+  try {
+    const channel = await getBackupChannel();
     if (!channel) {
       return;
     }
 
+    const messages = await channel.messages.fetch({ limit: 50 });
+    for (const message of messages.values()) {
+      await message.delete().catch(() => {});
+    }
+  } catch (error) {
+    console.error('Failed to clear backup channel:', error);
+  }
+}
+
+/**
+ * Keep exactly one backup message in the backup channel while a session exists.
+ * The new backup is sent first, then older backups are deleted.
+ */
+async function backupStateToDiscord(reason = 'state-change') {
+  try {
+    if (!hasActiveSessions()) {
+      return;
+    }
+
+    const channel = await getBackupChannel();
+    if (!channel) {
+      return;
+    }
+
+    const previousMessages = await channel.messages.fetch({ limit: 50 });
     const buffer = Buffer.from(JSON.stringify(STATE, null, 2), 'utf8');
 
-    await channel.send({
+    const newMessage = await channel.send({
       content: `Fictioncord state backup (${reason}) - ${new Date().toISOString()}`,
       files: [
         {
@@ -153,6 +186,12 @@ async function backupStateToDiscord(reason = 'manual') {
       ],
       allowedMentions: { parse: [] },
     });
+
+    for (const message of previousMessages.values()) {
+      if (message.id !== newMessage.id) {
+        await message.delete().catch(() => {});
+      }
+    }
   } catch (error) {
     console.error('Backup to Discord failed:', error);
   }
@@ -160,16 +199,12 @@ async function backupStateToDiscord(reason = 'manual') {
 
 async function restoreStateFromDiscord() {
   try {
-    if (!BACKUP_CHANNEL_ID) {
-      return false;
-    }
-
-    const channel = await client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+    const channel = await getBackupChannel();
     if (!channel) {
       return false;
     }
 
-    const messages = await channel.messages.fetch({ limit: 20 });
+    const messages = await channel.messages.fetch({ limit: 10 });
     const backupMessage = messages.find((message) => {
       const attachment = message.attachments.first();
       return attachment && attachment.name === 'state.json';
@@ -193,6 +228,10 @@ async function restoreStateFromDiscord() {
     const parsed = JSON.parse(text);
 
     if (!parsed || typeof parsed !== 'object' || !parsed.sessions) {
+      return false;
+    }
+
+    if (Object.keys(parsed.sessions).length === 0) {
       return false;
     }
 
@@ -510,17 +549,17 @@ async function submitPrompt(guildId, userId, promptText, channel) {
 
   if (!session || session.phase !== 'collect_prompts') {
     await announce(channel, 'Prompt collection is not open.');
-    return;
+    return false;
   }
 
   if (!session.writers.includes(userId)) {
     await announce(channel, 'Only enrolled writers can submit prompts.');
-    return;
+    return false;
   }
 
   if (session.prompts.length >= VOTE_EMOJIS.length) {
     await announce(channel, `Prompt list is full (max ${VOTE_EMOJIS.length}).`);
-    return;
+    return false;
   }
 
   session.prompts.push({
@@ -531,6 +570,7 @@ async function submitPrompt(guildId, userId, promptText, channel) {
   setSession(guildId, session);
 
   await announce(channel, `Prompt received from <@${userId}>: "${promptText}"`);
+  return true;
 }
 
 async function submitTurn(guildId, userId, text, channel) {
@@ -538,14 +578,14 @@ async function submitTurn(guildId, userId, text, channel) {
 
   if (!session || session.phase !== 'writing') {
     await announce(channel, 'There is no active writing turn right now.');
-    return;
+    return false;
   }
 
   const currentWriterId = session.writers[session.currentWriterIndex];
 
   if (currentWriterId !== userId) {
     await announce(channel, `It is not your turn. Current writer: <@${currentWriterId}>.`);
-    return;
+    return false;
   }
 
   session.story.push({
@@ -572,6 +612,8 @@ async function submitTurn(guildId, userId, text, channel) {
     `Turn received. Next writer is <@${nextWriterId}>.\n` +
       `You have ${TURN_HOURS} hours to submit with /submitturn.`
   );
+
+  return true;
 }
 
 async function announceWriters(session, channel) {
@@ -702,7 +744,7 @@ async function endSession(guildId, userId, channel) {
 
   if (!session) {
     await announce(channel, 'No active Fictioncord session.');
-    return;
+    return false;
   }
 
   const currentWriterId =
@@ -717,7 +759,7 @@ async function endSession(guildId, userId, channel) {
       channel,
       `Only the leader or current writer can end the story.\nLeader is <@${leaderId}>.`
     );
-    return;
+    return false;
   }
 
   const thread = await getStoryThread(session);
@@ -737,6 +779,9 @@ async function endSession(guildId, userId, channel) {
   }
 
   clearSession(guildId);
+  await clearBackupChannel();
+
+  return true;
 }
 
 async function skipStep(guildId, userId, channel) {
@@ -744,50 +789,53 @@ async function skipStep(guildId, userId, channel) {
 
   if (!session) {
     await announce(channel, 'No active Fictioncord session.');
-    return;
+    return false;
   }
 
   const leaderId = getLeaderId(session);
 
   if (leaderId !== userId) {
     await announce(channel, `Only the leader can skip steps.\nLeader is <@${leaderId}>.`);
-    return;
+    return false;
   }
 
   if (session.phase === 'enroll') {
     if (!session.writers.length) {
       await announce(channel, 'Enrollment closed. No writers joined. Session ended.');
       clearSession(session.guildId);
-      return;
+      await clearBackupChannel();
+      return true;
     }
 
     await announceWriters(session, channel);
     await startPromptCollection(session, channel);
-    return;
+    return true;
   }
 
   if (session.phase === 'collect_prompts') {
     if (!session.prompts.length) {
       await announce(channel, 'Prompt collection ended with no prompts. Session ended.');
       clearSession(session.guildId);
-      return;
+      await clearBackupChannel();
+      return true;
     }
 
     await startVoting(session, channel);
-    return;
+    return true;
   }
 
   if (session.phase === 'vote_prompt') {
     await selectPrompt(session, channel);
-    return;
+    return true;
   }
 
   if (session.phase === 'writing') {
     await advanceTurn(session, channel);
-    return;
+    return true;
   }
 
   await announce(channel, 'Nothing to skip right now.');
+  return false;
 }
 
 async function resetSession(guildId, userId, isAdmin, channel) {
@@ -795,7 +843,7 @@ async function resetSession(guildId, userId, isAdmin, channel) {
 
   if (!session) {
     await announce(channel, 'No active Fictioncord session.');
-    return;
+    return false;
   }
 
   const leaderId = getLeaderId(session);
@@ -805,7 +853,7 @@ async function resetSession(guildId, userId, isAdmin, channel) {
       channel,
       `Only the leader or a server admin can reset.\nLeader is <@${leaderId}>.`
     );
-    return;
+    return false;
   }
 
   const thread = await getStoryThread(session);
@@ -816,7 +864,10 @@ async function resetSession(guildId, userId, isAdmin, channel) {
   }
 
   clearSession(guildId);
+  await clearBackupChannel();
   await announce(channel, 'Fictioncord session reset.');
+
+  return true;
 }
 
 async function maybeSendReminder(session, channel) {
@@ -921,6 +972,7 @@ async function processSession(session) {
     if (!freshSession.writers.length) {
       await announce(channel, 'Enrollment closed. No writers joined. Session ended.');
       clearSession(freshSession.guildId);
+      await clearBackupChannel();
       return;
     }
 
@@ -933,6 +985,7 @@ async function processSession(session) {
     if (!freshSession.prompts.length) {
       await announce(channel, 'Prompt collection ended with no prompts. Session ended.');
       clearSession(freshSession.guildId);
+      await clearBackupChannel();
       return;
     }
 
@@ -968,6 +1021,8 @@ function createRulesMessage() {
     `- Only the current writer can submit a turn.\n` +
     `- Prompt voting supports up to ${VOTE_EMOJIS.length} prompts.\n` +
     `- The story thread is bot-only. User messages there are deleted.\n` +
+    `- The backup channel keeps one current backup while a session is active.\n` +
+    `- The backup channel is cleared when the session ends or is reset.\n` +
     `- The leader can skip steps with /skipstep.\n` +
     `- The leader or a server admin can reset the session with /resetfictioncord.`
   );
@@ -993,7 +1048,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
 
         if (!created) {
-          await interaction.editReply('There is already an active Fictioncord session in this server.');
+          await interaction.editReply(
+            'There is already an active Fictioncord session in this server.'
+          );
           return;
         }
 
@@ -1031,14 +1088,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const promptText = interaction.options.getString('prompt', true);
 
-        await submitPrompt(
+        const changed = await submitPrompt(
           interaction.guildId,
           interaction.user.id,
           promptText,
           interaction.channel
         );
 
-        await backupStateToDiscord('submitprompt');
+        if (changed) {
+          await backupStateToDiscord('submitprompt');
+        }
+
         await interaction.editReply('Prompt submission processed.');
         return;
       }
@@ -1086,17 +1146,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (commandName === 'theend') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        await endSession(interaction.guildId, interaction.user.id, interaction.channel);
-        await backupStateToDiscord('theend');
-        await interaction.editReply('End session request processed.');
+        const changed = await endSession(interaction.guildId, interaction.user.id, interaction.channel);
+
+        if (changed) {
+          await interaction.editReply('End session request processed.');
+          return;
+        }
+
+        await interaction.editReply('The story could not be ended.');
         return;
       }
 
       if (commandName === 'skipstep') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        await skipStep(interaction.guildId, interaction.user.id, interaction.channel);
-        await backupStateToDiscord('skipstep');
+        const changed = await skipStep(interaction.guildId, interaction.user.id, interaction.channel);
+
+        if (changed && hasActiveSessions()) {
+          await backupStateToDiscord('skipstep');
+        }
+
         await interaction.editReply('Skip request processed.');
         return;
       }
@@ -1104,15 +1173,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (commandName === 'resetfictioncord') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        await resetSession(
+        const changed = await resetSession(
           interaction.guildId,
           interaction.user.id,
           isGuildAdmin(interaction),
           interaction.channel
         );
 
-        await backupStateToDiscord('resetfictioncord');
-        await interaction.editReply('Reset request processed.');
+        if (changed) {
+          await interaction.editReply('Reset request processed.');
+          return;
+        }
+
+        await interaction.editReply('Reset could not be completed.');
         return;
       }
 
@@ -1148,9 +1221,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const turnText = interaction.fields.getTextInputValue('turn_text');
 
-      await submitTurn(interaction.guildId, interaction.user.id, turnText, interaction.channel);
+      const changed = await submitTurn(
+        interaction.guildId,
+        interaction.user.id,
+        turnText,
+        interaction.channel
+      );
 
-      await backupStateToDiscord('submitturn');
+      if (changed) {
+        await backupStateToDiscord('submitturn');
+      }
+
       await interaction.editReply('Turn submission processed.');
     }
   } catch (error) {
@@ -1235,7 +1316,7 @@ setInterval(() => {
     await registerCommands();
     await client.login(TOKEN);
 
-    if (!STATE.sessions || Object.keys(STATE.sessions).length === 0) {
+    if (!hasActiveSessions()) {
       console.log('Local state empty, attempting restore from Discord backup...');
       await restoreStateFromDiscord();
     }
