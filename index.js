@@ -1146,6 +1146,27 @@ client.on('warn', (info) => {
   logWithTime('warn', `Discord warning: ${info}`);
 });
 
+client.on(Events.MessageCreate, async (message) => {
+  try {
+    if (message.author?.bot) return;
+    if (!message.guildId) return;
+
+    const session = getSession(message.guildId);
+    if (!session) return;
+    if (!session.threadId) return;
+    if (!session.lockedStoryThread) return;
+    if (message.channelId !== session.threadId) return;
+
+    await message.delete().catch(() => {});
+
+    await message.author.send(
+      'Please do not write directly in the Fictioncord story thread. Use /submitturn in the main channel.'
+    ).catch(() => {});
+  } catch (error) {
+    logWithTime('error', 'Failed to moderate thread message.', error);
+  }
+});
+
 client.on(Events.InteractionCreate, async (interaction) => {
   lastInteractionAt = now();
 
