@@ -1142,10 +1142,6 @@ client.on('error', (error) => {
   logWithTime('error', 'Discord client error.', error);
 });
 
-client.on('warn', (info) => {
-  logWithTime('warn', `Discord warning: ${info}`);
-});
-
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (message.author?.bot) return;
@@ -1157,10 +1153,14 @@ client.on(Events.MessageCreate, async (message) => {
     if (!session.lockedStoryThread) return;
     if (message.channelId !== session.threadId) return;
 
+    const deletedText = message.content
+      ? message.content.slice(0, 1800)
+      : '[no text content]';
+
     await message.delete().catch(() => {});
 
     await message.author.send(
-      'Please do not write directly in the Fictioncord story thread. Use /submitturn in the main channel.'
+      `Please do not write directly in the Fictioncord story thread. Use /submitturn in the main channel.\n\n--- Deleted message ---\n${deletedText}`
     ).catch(() => {});
   } catch (error) {
     logWithTime('error', 'Failed to moderate thread message.', error);
