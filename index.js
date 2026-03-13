@@ -1,5 +1,4 @@
 require('dotenv').config();
-
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
@@ -22,6 +21,7 @@ const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const GUILD_IDS = process.env.DISCORD_GUILD_IDS;
 const BACKUP_CHANNEL_ID = process.env.DISCORD_BACKUP_CHANNEL_ID;
+const PORT = process.env.PORT || 10000;
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in environment.');
@@ -36,52 +36,20 @@ const VOTE_HOURS = 24;
 const FIRST_TURN_HOURS = 24;
 const TURN_HOURS = 24;
 const THREAD_AUTO_ARCHIVE_MINUTES = 1440;
-
 const MAX_PROMPT_LENGTH = 300;
 const MAX_TURN_LENGTH = 1500;
 
 const VOTE_EMOJIS = [
-  '1️⃣',
-  '2️⃣',
-  '3️⃣',
-  '4️⃣',
-  '5️⃣',
-  '6️⃣',
-  '7️⃣',
-  '8️⃣',
-  '9️⃣',
-  '🔟',
-  '🇦',
-  '🇧',
-  '🇨',
-  '🇩',
-  '🇪',
-  '🇫',
-  '🇬',
-  '🇭',
-  '🇮',
-  '🇯',
-  '🇰',
-  '🇱',
+  '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣',
+  '6️⃣', '7️⃣', '8️⃣', '9️⃣',
 ];
 
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
-  } catch {
-    return { sessions: {} };
-  }
-}
-
-let STATE = loadState();
-
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
+let lastDiscordReadyAt = null;
+let lastDiscordDisconnectAt = null;
+let lastInteractionAt = null;
+let heartbeatInterval = null;
+let backupInterval = null;
+let restoreAttempted = false;
 
 function now() {
   return Date.now();
@@ -111,9 +79,16 @@ function hasActiveSessions() {
   return Boolean(STATE.sessions && Object.keys(STATE.sessions).length > 0);
 }
 
-/**
- * Write state atomically to reduce the chance of a corrupted file.
- */
+function loadState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+  } catch {
+    return { sessions: {} };
+  }
+}
+
+let STATE = loadState();
+
 function saveState() {
   const tempPath = `${STATE_PATH}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(STATE, null, 2), 'utf8');
@@ -127,123 +102,13 @@ function getSession(guildId) {
 function setSession(guildId, session) {
   STATE.sessions[guildId] = session;
   saveState();
+  void backupStateToDiscord('state-change');
 }
 
 function clearSession(guildId) {
   delete STATE.sessions[guildId];
   saveState();
-}
-
-async function getBackupChannel() {
-  if (!BACKUP_CHANNEL_ID) {
-    return null;
-  }
-
-  return client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
-}
-
-async function clearBackupChannel() {
-  try {
-    const channel = await getBackupChannel();
-    if (!channel) {
-      return;
-    }
-
-    const messages = await channel.messages.fetch({ limit: 50 });
-    for (const message of messages.values()) {
-      await message.delete().catch(() => {});
-    }
-  } catch (error) {
-    console.error('Failed to clear backup channel:', error);
-  }
-}
-
-/**
- * Keep exactly one backup message in the backup channel while a session exists.
- * The new backup is sent first, then older backups are deleted.
- */
-async function backupStateToDiscord(reason = 'state-change') {
-  try {
-    if (!hasActiveSessions()) {
-      return;
-    }
-
-    const channel = await getBackupChannel();
-    if (!channel) {
-      return;
-    }
-
-    const previousMessages = await channel.messages.fetch({ limit: 50 });
-    const buffer = Buffer.from(JSON.stringify(STATE, null, 2), 'utf8');
-
-    const newMessage = await channel.send({
-      content: `Fictioncord state backup (${reason}) - ${new Date().toISOString()}`,
-      files: [
-        {
-          attachment: buffer,
-          name: 'state.json',
-        },
-      ],
-      allowedMentions: { parse: [] },
-    });
-
-    for (const message of previousMessages.values()) {
-      if (message.id !== newMessage.id) {
-        await message.delete().catch(() => {});
-      }
-    }
-  } catch (error) {
-    console.error('Backup to Discord failed:', error);
-  }
-}
-
-async function restoreStateFromDiscord() {
-  try {
-    const channel = await getBackupChannel();
-    if (!channel) {
-      return false;
-    }
-
-    const messages = await channel.messages.fetch({ limit: 10 });
-    const backupMessage = messages.find((message) => {
-      const attachment = message.attachments.first();
-      return attachment && attachment.name === 'state.json';
-    });
-
-    if (!backupMessage) {
-      return false;
-    }
-
-    const attachment = backupMessage.attachments.first();
-    if (!attachment) {
-      return false;
-    }
-
-    const response = await fetch(attachment.url);
-    if (!response.ok) {
-      return false;
-    }
-
-    const text = await response.text();
-    const parsed = JSON.parse(text);
-
-    if (!parsed || typeof parsed !== 'object' || !parsed.sessions) {
-      return false;
-    }
-
-    if (Object.keys(parsed.sessions).length === 0) {
-      return false;
-    }
-
-    STATE = parsed;
-    saveState();
-
-    console.log('State restored from Discord backup.');
-    return true;
-  } catch (error) {
-    console.error('Restore from Discord failed:', error);
-    return false;
-  }
+  void backupStateToDiscord('state-cleared');
 }
 
 function getLeaderId(session) {
@@ -253,7 +118,7 @@ function getLeaderId(session) {
 function isGuildAdmin(interaction) {
   return Boolean(
     interaction.memberPermissions?.has('Administrator') ||
-      interaction.memberPermissions?.has('ManageGuild')
+    interaction.memberPermissions?.has('ManageGuild')
   );
 }
 
@@ -317,9 +182,80 @@ function buildStatusMessage(session) {
   return status;
 }
 
-/**
- * Prevent bot reposts from triggering @everyone, @here or user mentions.
- */
+function summarizeState() {
+  const guildIds = Object.keys(STATE.sessions || {});
+  return {
+    activeSessions: guildIds.length,
+    guildIds,
+    phases: guildIds.map((guildId) => ({
+      guildId,
+      phase: STATE.sessions[guildId]?.phase || null,
+    })),
+  };
+}
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+function getWsStatusName(status) {
+  const mapping = {
+    0: 'READY',
+    1: 'CONNECTING',
+    2: 'RECONNECTING',
+    3: 'IDLE',
+    4: 'NEARLY',
+    5: 'DISCONNECTED',
+    6: 'WAITING_FOR_GUILDS',
+    7: 'IDENTIFYING',
+    8: 'RESUMING',
+  };
+
+  return mapping[status] ?? `UNKNOWN_${String(status)}`;
+}
+
+function buildHealthPayload() {
+  const ready = client.isReady();
+  const wsStatus = client.ws?.status ?? null;
+
+  return {
+    ok: ready,
+    pid: process.pid,
+    uptimeSeconds: Math.round(process.uptime()),
+    nodeEnv: process.env.NODE_ENV || 'development',
+    discord: {
+      ready,
+      wsStatus,
+      wsStatusName: getWsStatusName(wsStatus),
+      userTag: client.user?.tag || null,
+      lastReadyAt: lastDiscordReadyAt ? new Date(lastDiscordReadyAt).toISOString() : null,
+      lastDisconnectAt: lastDiscordDisconnectAt ? new Date(lastDiscordDisconnectAt).toISOString() : null,
+      lastInteractionAt: lastInteractionAt ? new Date(lastInteractionAt).toISOString() : null,
+      guildCount: client.guilds?.cache?.size ?? 0,
+    },
+    state: summarizeState(),
+    memory: {
+      rss: process.memoryUsage().rss,
+      heapTotal: process.memoryUsage().heapTotal,
+      heapUsed: process.memoryUsage().heapUsed,
+    },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function logWithTime(level, message, extra = undefined) {
+  const prefix = `[${new Date().toISOString()}] ${message}`;
+  if (extra === undefined) {
+    console[level](prefix);
+    return;
+  }
+  console[level](prefix, extra);
+}
+
 async function safeSend(channel, content) {
   return channel.send({
     content,
@@ -331,12 +267,128 @@ async function announce(channel, text) {
   return safeSend(channel, text);
 }
 
+async function getBackupChannel() {
+  if (!BACKUP_CHANNEL_ID) {
+    return null;
+  }
+
+  return client.channels.fetch(BACKUP_CHANNEL_ID).catch((error) => {
+    logWithTime('error', 'Failed to fetch backup channel.', error);
+    return null;
+  });
+}
+
+async function clearBackupChannel() {
+  try {
+    const channel = await getBackupChannel();
+    if (!channel) {
+      return;
+    }
+
+    const messages = await channel.messages.fetch({ limit: 50 });
+
+    for (const message of messages.values()) {
+      await message.delete().catch(() => {});
+    }
+  } catch (error) {
+    logWithTime('error', 'Failed to clear backup channel.', error);
+  }
+}
+
+async function backupStateToDiscord(reason = 'state-change') {
+  try {
+    if (!hasActiveSessions()) {
+      return;
+    }
+
+    const channel = await getBackupChannel();
+    if (!channel) {
+      return;
+    }
+
+    const previousMessages = await channel.messages.fetch({ limit: 50 });
+    const buffer = Buffer.from(JSON.stringify(STATE, null, 2), 'utf8');
+
+    const newMessage = await channel.send({
+      content: `Fictioncord state backup (${reason}) - ${new Date().toISOString()}`,
+      files: [
+        {
+          attachment: buffer,
+          name: 'state.json',
+        },
+      ],
+      allowedMentions: { parse: [] },
+    });
+
+    for (const message of previousMessages.values()) {
+      if (message.id !== newMessage.id) {
+        await message.delete().catch(() => {});
+      }
+    }
+
+    logWithTime('log', `Backup pushed to Discord. Reason: ${reason}`);
+  } catch (error) {
+    logWithTime('error', 'Backup to Discord failed.', error);
+  }
+}
+
+async function restoreStateFromDiscord() {
+  try {
+    const channel = await getBackupChannel();
+    if (!channel) {
+      return false;
+    }
+
+    const messages = await channel.messages.fetch({ limit: 10 });
+    const backupMessage = messages.find((message) => {
+      const attachment = message.attachments.first();
+      return attachment && attachment.name === 'state.json';
+    });
+
+    if (!backupMessage) {
+      return false;
+    }
+
+    const attachment = backupMessage.attachments.first();
+    if (!attachment) {
+      return false;
+    }
+
+    const response = await fetch(attachment.url);
+    if (!response.ok) {
+      return false;
+    }
+
+    const text = await response.text();
+    const parsed = JSON.parse(text);
+
+    if (!parsed || typeof parsed !== 'object' || !parsed.sessions) {
+      return false;
+    }
+
+    if (Object.keys(parsed.sessions).length === 0) {
+      return false;
+    }
+
+    STATE = parsed;
+    saveState();
+    logWithTime('log', 'State restored from Discord backup.');
+    return true;
+  } catch (error) {
+    logWithTime('error', 'Restore from Discord failed.', error);
+    return false;
+  }
+}
+
 async function getMainChannel(session) {
   if (!session?.channelId) {
     return null;
   }
 
-  return client.channels.fetch(session.channelId).catch(() => null);
+  return client.channels.fetch(session.channelId).catch((error) => {
+    logWithTime('error', `Failed to fetch main channel ${session.channelId}.`, error);
+    return null;
+  });
 }
 
 async function getStoryThread(session) {
@@ -344,8 +396,10 @@ async function getStoryThread(session) {
     return null;
   }
 
-  const thread = await client.channels.fetch(session.threadId).catch(() => null);
-  return thread || null;
+  return client.channels.fetch(session.threadId).catch((error) => {
+    logWithTime('error', `Failed to fetch story thread ${session.threadId}.`, error);
+    return null;
+  });
 }
 
 async function getStoryChannel(session, fallbackChannel) {
@@ -362,11 +416,9 @@ async function createStoryThread(session, channel, promptText) {
 
   await safeSend(thread, `Selected prompt:\n${promptText}`);
 
-  const guild =
-    channel.guild || (await client.guilds.fetch(channel.guildId).catch(() => null));
+  const guild = channel.guild || (await client.guilds.fetch(channel.guildId).catch(() => null));
   const everyoneRole = guild?.roles?.everyone;
-  const botMember =
-    guild?.members?.me || (guild ? await guild.members.fetchMe().catch(() => null) : null);
+  const botMember = guild?.members?.me || (guild ? await guild.members.fetchMe().catch(() => null) : null);
 
   if (thread.permissionOverwrites) {
     if (everyoneRole) {
@@ -386,7 +438,6 @@ async function createStoryThread(session, channel, promptText) {
 
   session.threadId = thread.id;
   session.lockedStoryThread = true;
-
   return thread;
 }
 
@@ -472,7 +523,8 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
   if (GUILD_IDS) {
-    const ids = GUILD_IDS.split(',')
+    const ids = GUILD_IDS
+      .split(',')
       .map((id) => id.trim())
       .filter(Boolean);
 
@@ -482,7 +534,7 @@ async function registerCommands() {
       });
     }
 
-    console.log(`Registered guild commands for ${ids.length} guild(s).`);
+    logWithTime('log', `Registered guild commands for ${ids.length} guild(s).`);
     return;
   }
 
@@ -490,14 +542,16 @@ async function registerCommands() {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
       body: commands,
     });
-    console.log('Registered guild commands.');
+
+    logWithTime('log', 'Registered guild commands.');
     return;
   }
 
   await rest.put(Routes.applicationCommands(CLIENT_ID), {
     body: commands,
   });
-  console.log('Registered global commands (may take up to about 1 hour to appear).');
+
+  logWithTime('log', 'Registered global commands (may take up to about 1 hour to appear).');
 }
 
 async function openEnrollment(guildId, channelId, userId, channel) {
@@ -562,11 +616,7 @@ async function submitPrompt(guildId, userId, promptText, channel) {
     return false;
   }
 
-  session.prompts.push({
-    userId,
-    text: promptText,
-  });
-
+  session.prompts.push({ userId, text: promptText });
   setSession(guildId, session);
 
   await announce(channel, `Prompt received from <@${userId}>: "${promptText}"`);
@@ -595,7 +645,6 @@ async function submitTurn(guildId, userId, text, channel) {
   });
 
   const storyChannel = await getStoryChannel(session, channel);
-
   await safeSend(storyChannel, `Turn ${session.story.length} by <@${userId}>:\n${text}`);
 
   session.currentWriterIndex = (session.currentWriterIndex + 1) % session.writers.length;
@@ -609,7 +658,8 @@ async function submitTurn(guildId, userId, text, channel) {
 
   await announce(
     channel,
-    `Turn received. Next writer is <@${nextWriterId}>.\n` +
+    `Turn received.\n` +
+      `Next writer is <@${nextWriterId}>.\n` +
       `You have ${TURN_HOURS} hours to submit with /submitturn.`
   );
 
@@ -633,7 +683,8 @@ async function startPromptCollection(session, channel) {
 
   await announce(
     channel,
-    `Now we are collecting prompts. You have ${PROMPT_HOURS} hours to submit with /submitprompt.\n` +
+    `Now we are collecting prompts.\n` +
+      `You have ${PROMPT_HOURS} hours to submit with /submitprompt.\n` +
       `There is a limit of ${VOTE_EMOJIS.length} prompts total.`
   );
 }
@@ -735,7 +786,8 @@ async function advanceTurn(session, channel) {
   await announce(
     channel,
     `Time is up.\n` +
-      `Next writer is <@${nextWriterId}>. You have ${TURN_HOURS} hours to submit with /submitturn.`
+      `Next writer is <@${nextWriterId}>.\n` +
+      `You have ${TURN_HOURS} hours to submit with /submitturn.`
   );
 }
 
@@ -747,8 +799,9 @@ async function endSession(guildId, userId, channel) {
     return false;
   }
 
-  const currentWriterId =
-    session.phase === 'writing' ? session.writers[session.currentWriterIndex] : null;
+  const currentWriterId = session.phase === 'writing'
+    ? session.writers[session.currentWriterIndex]
+    : null;
 
   const leaderId = getLeaderId(session);
   const isLeader = leaderId === userId;
@@ -780,7 +833,6 @@ async function endSession(guildId, userId, channel) {
 
   clearSession(guildId);
   await clearBackupChannel();
-
   return true;
 }
 
@@ -866,13 +918,12 @@ async function resetSession(guildId, userId, isAdmin, channel) {
   clearSession(guildId);
   await clearBackupChannel();
   await announce(channel, 'Fictioncord session reset.');
-
   return true;
 }
 
 async function maybeSendReminder(session, channel) {
   if (!session) {
-    return;
+    return false;
   }
 
   if (session.phase === 'enroll') {
@@ -929,19 +980,13 @@ async function maybeSendReminder(session, channel) {
 
     if (hoursLeft <= 12 && !session.reminders.turn12) {
       session.reminders.turn12 = true;
-      await announce(
-        channel,
-        `Reminder: 12 hours left for <@${currentWriterId}> to submit their turn.`
-      );
+      await announce(channel, `Reminder: 12 hours left for <@${currentWriterId}> to submit their turn.`);
       return true;
     }
 
     if (hoursLeft <= 1 && !session.reminders.turn1) {
       session.reminders.turn1 = true;
-      await announce(
-        channel,
-        `Reminder: 1 hour left for <@${currentWriterId}> to submit their turn.`
-      );
+      await announce(channel, `Reminder: 1 hour left for <@${currentWriterId}> to submit their turn.`);
       return true;
     }
   }
@@ -951,19 +996,16 @@ async function maybeSendReminder(session, channel) {
 
 async function processSession(session) {
   const freshSession = getSession(session.guildId);
-
   if (!freshSession) {
     return;
   }
 
   const channel = await getMainChannel(freshSession);
-
   if (!channel) {
     return;
   }
 
   const reminderSent = await maybeSendReminder(freshSession, channel);
-
   if (reminderSent) {
     setSession(freshSession.guildId, freshSession);
   }
@@ -1020,91 +1062,226 @@ function createRulesMessage() {
     `Notes:\n` +
     `- Only the current writer can submit a turn.\n` +
     `- Prompt voting supports up to ${VOTE_EMOJIS.length} prompts.\n` +
-    `- The story thread is bot-only. User messages there are deleted.\n` +
-    `- The backup channel keeps one current backup while a session is active.\n` +
-    `- The backup channel is cleared when the session ends or is reset.\n` +
-    `- The leader can skip steps with /skipstep.\n` +
-    `- The leader or a server admin can reset the session with /resetfictioncord.`
+    `- The story thread is bot-only.`
   );
 }
 
-client.once(Events.ClientReady, async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+async function processAllSessions() {
+  const sessions = Object.values(STATE.sessions || {});
+  for (const session of sessions) {
+    try {
+      await processSession(session);
+    } catch (error) {
+      logWithTime('error', `Failed while processing session for guild ${session.guildId}.`, error);
+    }
+  }
+}
+
+function startIntervals() {
+  if (!heartbeatInterval) {
+    heartbeatInterval = setInterval(() => {
+      const payload = buildHealthPayload();
+      logWithTime('log', 'Heartbeat', payload);
+    }, 5 * 60 * 1000);
+  }
+
+  if (!backupInterval) {
+    backupInterval = setInterval(() => {
+      if (hasActiveSessions()) {
+        void backupStateToDiscord('periodic');
+      }
+    }, 10 * 60 * 1000);
+  }
+
+  setInterval(() => {
+    void processAllSessions();
+  }, 60 * 1000);
+}
+
+client.once(Events.ClientReady, async (readyClient) => {
+  lastDiscordReadyAt = now();
+  logWithTime('log', `Discord ready as ${readyClient.user.tag}`);
+
+  try {
+    await registerCommands();
+  } catch (error) {
+    logWithTime('error', 'Command registration failed.', error);
+  }
+
+  try {
+    if (!restoreAttempted) {
+      restoreAttempted = true;
+
+      const stateIsEmpty = !hasActiveSessions();
+      if (stateIsEmpty) {
+        logWithTime('log', 'Local state empty, attempting restore from Discord backup...');
+        await restoreStateFromDiscord();
+      }
+    }
+  } catch (error) {
+    logWithTime('error', 'Restore attempt failed during ready.', error);
+  }
+
+  startIntervals();
+});
+
+client.on('shardDisconnect', (event, shardId) => {
+  lastDiscordDisconnectAt = now();
+  logWithTime('error', `Discord shard disconnected. shardId=${shardId} code=${event?.code ?? 'unknown'}`);
+});
+
+client.on('shardReconnecting', (shardId) => {
+  logWithTime('warn', `Discord shard reconnecting. shardId=${shardId}`);
+});
+
+client.on('shardResume', (shardId, replayedEvents) => {
+  logWithTime('log', `Discord shard resumed. shardId=${shardId} replayedEvents=${replayedEvents}`);
+});
+
+client.on('error', (error) => {
+  logWithTime('error', 'Discord client error.', error);
+});
+
+client.on('warn', (info) => {
+  logWithTime('warn', `Discord warning: ${info}`);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  try {
-    if (interaction.isChatInputCommand()) {
-      const { commandName } = interaction;
+  lastInteractionAt = now();
 
-      if (commandName === 'startfictioncord') {
+  try {
+    if (!interaction.isChatInputCommand() && !interaction.isModalSubmit()) {
+      return;
+    }
+
+    if (interaction.isChatInputCommand()) {
+      logWithTime('log', 'Interaction received', {
+        commandName: interaction.commandName,
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        userId: interaction.user?.id,
+      });
+    }
+
+    if (interaction.isModalSubmit()) {
+      logWithTime('log', 'Modal submit received', {
+        customId: interaction.customId,
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        userId: interaction.user?.id,
+      });
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (!interaction.customId.startsWith('submitturn:')) {
+        return;
+      }
+
+      const guildId = interaction.guildId;
+      const text = interaction.fields.getTextInputValue('turn_text')?.trim() || '';
+
+      if (!guildId) {
+        await interaction.reply({
+          content: 'This command only works in a server.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (!text) {
+        await interaction.reply({
+          content: 'Your turn is empty.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (text.length > MAX_TURN_LENGTH) {
+        await interaction.reply({
+          content: `Your turn is too long. Max ${MAX_TURN_LENGTH} characters.`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      const ok = await submitTurn(
+        guildId,
+        interaction.user.id,
+        text,
+        interaction.channel
+      );
+
+      await interaction.editReply({
+        content: ok ? 'Your turn was submitted.' : 'Your turn could not be submitted.',
+      });
+
+      return;
+    }
+
+    if (!interaction.isChatInputCommand()) {
+      return;
+    }
+
+    const guildId = interaction.guildId;
+    const channel = interaction.channel;
+
+    if (!guildId || !channel) {
+      await interaction.reply({
+        content: 'This command only works in a server channel.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    switch (interaction.commandName) {
+      case 'startfictioncord': {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const created = await openEnrollment(
-          interaction.guildId,
+        const opened = await openEnrollment(
+          guildId,
           interaction.channelId,
           interaction.user.id,
-          interaction.channel
+          channel
         );
 
-        if (!created) {
-          await interaction.editReply(
-            'There is already an active Fictioncord session in this server.'
-          );
-          return;
-        }
-
-        await backupStateToDiscord('startfictioncord');
-        await interaction.editReply('Fictioncord session started.');
+        await interaction.editReply({
+          content: opened
+            ? 'Fictioncord session started.'
+            : 'There is already an active Fictioncord session.',
+        });
         return;
       }
 
-      if (commandName === 'joinfictioncord') {
+      case 'joinfictioncord': {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const result = await joinEnrollment(
-          interaction.guildId,
-          interaction.user.id,
-          interaction.channel
-        );
+        const result = await joinEnrollment(guildId, interaction.user.id, channel);
 
-        if (result === 'not_open') {
-          await interaction.editReply('Enrollment is not open.');
-          return;
-        }
+        let content = 'Done.';
+        if (result === 'not_open') content = 'Enrollment is not open.';
+        if (result === 'already') content = 'You are already enrolled.';
+        if (result === 'joined') content = 'You joined the session.';
 
-        if (result === 'already') {
-          await interaction.editReply('You are already enrolled as a writer.');
-          return;
-        }
-
-        await backupStateToDiscord('joinfictioncord');
-        await interaction.editReply('You joined the Fictioncord session as a writer.');
+        await interaction.editReply({ content });
         return;
       }
 
-      if (commandName === 'submitprompt') {
+      case 'submitprompt': {
+        const promptText = interaction.options.getString('prompt', true).trim();
+
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ok = await submitPrompt(guildId, interaction.user.id, promptText, channel);
 
-        const promptText = interaction.options.getString('prompt', true);
-
-        const changed = await submitPrompt(
-          interaction.guildId,
-          interaction.user.id,
-          promptText,
-          interaction.channel
-        );
-
-        if (changed) {
-          await backupStateToDiscord('submitprompt');
-        }
-
-        await interaction.editReply('Prompt submission processed.');
+        await interaction.editReply({
+          content: ok ? 'Prompt submitted.' : 'Prompt could not be submitted.',
+        });
         return;
       }
 
-      if (commandName === 'submitturn') {
-        const session = getSession(interaction.guildId);
+      case 'submitturn': {
+        const session = getSession(guildId);
 
         if (!session || session.phase !== 'writing') {
           await interaction.reply({
@@ -1114,225 +1291,147 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const currentWriterId = session.writers[session.currentWriterIndex];
-
-        if (currentWriterId !== interaction.user.id) {
-          await interaction.reply({
-            content: `It is not your turn. Current writer: <@${currentWriterId}>.`,
-            flags: MessageFlags.Ephemeral,
-          });
-          return;
-        }
-
         const modal = new ModalBuilder()
-          .setCustomId('fictioncord_submitturn_modal')
-          .setTitle('Submit your story turn');
+          .setCustomId(`submitturn:${guildId}`)
+          .setTitle('Submit your turn');
 
         const textInput = new TextInputBuilder()
           .setCustomId('turn_text')
-          .setLabel(`Your turn (max ${MAX_TURN_LENGTH} chars)`)
+          .setLabel(`Your story turn (max ${MAX_TURN_LENGTH} chars)`)
           .setStyle(TextInputStyle.Paragraph)
           .setMaxLength(MAX_TURN_LENGTH)
           .setRequired(true);
 
         const row = new ActionRowBuilder().addComponents(textInput);
-
         modal.addComponents(row);
 
         await interaction.showModal(modal);
         return;
       }
 
-      if (commandName === 'theend') {
+      case 'theend': {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ok = await endSession(guildId, interaction.user.id, channel);
 
-        const changed = await endSession(interaction.guildId, interaction.user.id, interaction.channel);
-
-        if (changed) {
-          await interaction.editReply('End session request processed.');
-          return;
-        }
-
-        await interaction.editReply('The story could not be ended.');
+        await interaction.editReply({
+          content: ok ? 'Session ended.' : 'You cannot end the session.',
+        });
         return;
       }
 
-      if (commandName === 'skipstep') {
+      case 'skipstep': {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ok = await skipStep(guildId, interaction.user.id, channel);
 
-        const changed = await skipStep(interaction.guildId, interaction.user.id, interaction.channel);
-
-        if (changed && hasActiveSessions()) {
-          await backupStateToDiscord('skipstep');
-        }
-
-        await interaction.editReply('Skip request processed.');
+        await interaction.editReply({
+          content: ok ? 'Step skipped.' : 'Could not skip the step.',
+        });
         return;
       }
 
-      if (commandName === 'resetfictioncord') {
+      case 'resetfictioncord': {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-        const changed = await resetSession(
-          interaction.guildId,
+        const ok = await resetSession(
+          guildId,
           interaction.user.id,
           isGuildAdmin(interaction),
-          interaction.channel
+          channel
         );
 
-        if (changed) {
-          await interaction.editReply('Reset request processed.');
-          return;
-        }
-
-        await interaction.editReply('Reset could not be completed.');
+        await interaction.editReply({
+          content: ok ? 'Session reset.' : 'You cannot reset the session.',
+        });
         return;
       }
 
-      if (commandName === 'rulesfictioncord') {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        await interaction.editReply(createRulesMessage());
-        return;
-      }
-
-      if (commandName === 'statusfictioncord') {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-        const session = getSession(interaction.guildId);
-
-        if (!session) {
-          await interaction.editReply('No active Fictioncord session.');
-          return;
-        }
-
-        await interaction.editReply(buildStatusMessage(session));
-        return;
-      }
-
-      return;
-    }
-
-    if (interaction.isModalSubmit()) {
-      if (interaction.customId !== 'fictioncord_submitturn_modal') {
-        return;
-      }
-
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-      const turnText = interaction.fields.getTextInputValue('turn_text');
-
-      const changed = await submitTurn(
-        interaction.guildId,
-        interaction.user.id,
-        turnText,
-        interaction.channel
-      );
-
-      if (changed) {
-        await backupStateToDiscord('submitturn');
-      }
-
-      await interaction.editReply('Turn submission processed.');
-    }
-  } catch (error) {
-    console.error('Interaction error:', error);
-
-    if (interaction.deferred || interaction.replied) {
-      await interaction
-        .followUp({
-          content: 'Something went wrong while processing that action.',
+      case 'rulesfictioncord': {
+        await interaction.reply({
+          content: createRulesMessage(),
           flags: MessageFlags.Ephemeral,
-        })
-        .catch(() => {});
-      return;
-    }
+        });
+        return;
+      }
 
-    await interaction
-      .reply({
-        content: 'Something went wrong while processing that action.',
-        flags: MessageFlags.Ephemeral,
-      })
-      .catch(() => {});
+      case 'statusfictioncord': {
+        const session = getSession(guildId);
+        const health = buildHealthPayload();
+
+        await interaction.reply({
+          content: session
+            ? `${buildStatusMessage(session)}\n\nBot health:\n` +
+              `- Discord ready: ${health.discord.ready}\n` +
+              `- WS status: ${health.discord.wsStatusName}\n` +
+              `- Active sessions: ${health.state.activeSessions}`
+            : `No active Fictioncord session.\n\nBot health:\n` +
+              `- Discord ready: ${health.discord.ready}\n` +
+              `- WS status: ${health.discord.wsStatusName}\n` +
+              `- Active sessions: ${health.state.activeSessions}`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      default: {
+        await interaction.reply({
+          content: 'Unknown command.',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    }
+  } catch (error) {
+    logWithTime('error', 'Interaction handler failed.', error);
+
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({
+          content: 'An internal error occurred while handling this command.',
+        });
+      } else {
+        await interaction.reply({
+          content: 'An internal error occurred while handling this command.',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    } catch (replyError) {
+      logWithTime('error', 'Failed to send interaction error reply.', replyError);
+    }
   }
 });
 
-/**
- * Delete any user message posted directly in the active Fictioncord story thread.
- * No warning is sent back to avoid polluting the thread.
- */
-client.on(Events.MessageCreate, async (message) => {
-  try {
-    if (!message.guild) {
-      return;
-    }
-
-    if (message.author.bot) {
-      return;
-    }
-
-    const session = getSession(message.guild.id);
-
-    if (!session) {
-      return;
-    }
-
-    if (!session.threadId || !session.lockedStoryThread) {
-      return;
-    }
-
-    if (message.channel.id !== session.threadId) {
-      return;
-    }
-
-    await message.delete().catch(() => {});
-  } catch (error) {
-    console.error('Thread moderation error:', error);
-  }
+process.on('unhandledRejection', (reason) => {
+  logWithTime('error', 'Unhandled rejection.', reason);
 });
 
-setInterval(async () => {
-  try {
-    const sessions = Object.values(STATE.sessions);
+process.on('uncaughtException', (error) => {
+  logWithTime('error', 'Uncaught exception.', error);
+});
 
-    for (const session of sessions) {
-      await processSession(session);
-    }
-  } catch (error) {
-    console.error('Timer loop error:', error);
-  }
-}, 60 * 1000);
+process.on('SIGTERM', () => {
+  logWithTime('warn', 'Received SIGTERM. Shutting down.');
+  process.exit(0);
+});
 
-setInterval(() => {
-  try {
-    saveState();
-  } catch (error) {
-    console.error('Autosave error:', error);
-  }
-}, 60 * 1000);
-
-(async () => {
-  try {
-    STATE = loadState();
-    await registerCommands();
-    await client.login(TOKEN);
-
-    if (!hasActiveSessions()) {
-      console.log('Local state empty, attempting restore from Discord backup...');
-      await restoreStateFromDiscord();
-    }
-  } catch (error) {
-    console.error('Startup error:', error);
-    process.exit(1);
-  }
-})();
-
-const PORT = process.env.PORT || 10000;
+process.on('SIGINT', () => {
+  logWithTime('warn', 'Received SIGINT. Shutting down.');
+  process.exit(0);
+});
 
 http
   .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Fictioncord bot is running.');
+    const payload = buildHealthPayload();
+    const body = JSON.stringify(payload, null, 2);
+    const statusCode = payload.ok ? 200 : 503;
+
+    res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(body);
   })
   .listen(PORT, '0.0.0.0', () => {
-    console.log(`HTTP server listening on port ${PORT}`);
+    logWithTime('log', `HTTP server listening on port ${PORT}`);
   });
+
+client.login(TOKEN).then(() => {
+  logWithTime('log', 'client.login() resolved.');
+}).catch((error) => {
+  logWithTime('error', 'client.login() failed.', error);
+  process.exit(1);
+});
