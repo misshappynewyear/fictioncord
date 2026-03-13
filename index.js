@@ -817,20 +817,21 @@ async function endSession(guildId, userId, channel) {
     return false;
   }
 
+  const mainChannel = await getMainChannel(session) || channel;
   const thread = await getStoryThread(session);
 
-  await announce(channel, 'The story has ended.');
+  await announce(mainChannel, 'The story has ended.');
 
   if (session.selectedPromptText) {
-    await announce(channel, `Selected prompt: "${session.selectedPromptText}"`);
+    await announce(mainChannel, `Selected prompt: "${session.selectedPromptText}"`);
   }
 
   if (thread) {
-    await announce(channel, `Read the full story in the thread:\n${thread.url}`);
+    await announce(mainChannel, `Read the full story in the thread:\n${thread.url}`);
     await thread.setLocked(true).catch(() => {});
     await thread.setArchived(true).catch(() => {});
   } else {
-    await announce(channel, 'The story thread could not be found.');
+    await announce(mainChannel, 'The story thread could not be found.');
   }
 
   clearSession(guildId);
