@@ -40,8 +40,10 @@ const MAX_PROMPT_LENGTH = 300;
 const MAX_TURN_LENGTH = 1500;
 
 const VOTE_EMOJIS = [
-  '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣',
-  '6️⃣', '7️⃣', '8️⃣', '9️⃣',
+  '0️⃣',
+  '1️⃣','2️⃣','3️⃣','4️⃣','5️⃣',
+  '6️⃣','7️⃣','8️⃣','9️⃣',
+  '🔟'
 ];
 
 let lastDiscordReadyAt = null;
