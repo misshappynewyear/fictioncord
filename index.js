@@ -1480,13 +1480,6 @@ async function runDiscordConnectivityChecks() {
     const controller1 = new AbortController();
     const timer1 = setTimeout(() => controller1.abort(), 10000);
 
-    const meResponse = await fetch('https://discord.com/api/v10/users/@me', {
-      method: 'GET',
-      headers: {
-        Authorization: `Bot ${TOKEN}`,
-      },
-      signal: controller1.signal,
-    });
 
     clearTimeout(timer1);
 
@@ -1511,14 +1504,6 @@ async function runDiscordConnectivityChecks() {
   try {
     const controller2 = new AbortController();
     const timer2 = setTimeout(() => controller2.abort(), 10000);
-
-    const gatewayResponse = await fetch('https://discord.com/api/v10/gateway/bot', {
-      method: 'GET',
-      headers: {
-        Authorization: `Bot ${TOKEN}`,
-      },
-      signal: controller2.signal,
-    });
 
     clearTimeout(timer2);
 
