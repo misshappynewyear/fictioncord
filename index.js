@@ -23,6 +23,21 @@ const GUILD_IDS = process.env.DISCORD_GUILD_IDS;
 const BACKUP_CHANNEL_ID = process.env.DISCORD_BACKUP_CHANNEL_ID;
 const PORT = process.env.PORT || 10000;
 
+console.log('[startup] Environment check', {
+  hasToken: Boolean(TOKEN),
+  tokenLength: TOKEN ? TOKEN.length : 0,
+  hasClientId: Boolean(CLIENT_ID),
+  clientIdLength: CLIENT_ID ? CLIENT_ID.length : 0,
+  hasGuildId: Boolean(GUILD_ID),
+  guildIdLength: GUILD_ID ? GUILD_ID.length : 0,
+  hasGuildIds: Boolean(GUILD_IDS),
+  guildIdsCount: GUILD_IDS ? GUILD_IDS.split(',').map(s => s.trim()).filter(Boolean).length : 0,
+  hasBackupChannelId: Boolean(BACKUP_CHANNEL_ID),
+  backupChannelIdLength: BACKUP_CHANNEL_ID ? BACKUP_CHANNEL_ID.length : 0,
+  port: PORT,
+  nodeEnv: process.env.NODE_ENV || null,
+});
+
 if (!TOKEN || !CLIENT_ID) {
   console.error('Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in environment.');
   process.exit(1);
@@ -1128,6 +1143,12 @@ client.once(Events.ClientReady, async (readyClient) => {
   startIntervals();
 });
 
+setTimeout(() => {
+  if (!client.isReady()) {
+    logWithTime('warn', 'Client still not ready 30s after startup.', buildHealthPayload());
+  }
+}, 30000);
+
 client.on('shardDisconnect', (event, shardId) => {
   lastDiscordDisconnectAt = now();
   logWithTime('error', `Discord shard disconnected. shardId=${shardId} code=${event?.code ?? 'unknown'}`);
@@ -1452,6 +1473,11 @@ http
   .listen(PORT, '0.0.0.0', () => {
     logWithTime('log', `HTTP server listening on port ${PORT}`);
   });
+
+logWithTime('log', 'About to call client.login()', {
+  hasToken: Boolean(TOKEN),
+  tokenLength: TOKEN ? TOKEN.length : 0,
+});
 
 client.login(TOKEN).then(() => {
   logWithTime('log', 'client.login() resolved.');
