@@ -1474,14 +1474,85 @@ http
     logWithTime('log', `HTTP server listening on port ${PORT}`);
   });
 
-logWithTime('log', 'About to call client.login()', {
-  hasToken: Boolean(TOKEN),
-  tokenLength: TOKEN ? TOKEN.length : 0,
-});
 
-client.login(TOKEN).then(() => {
-  logWithTime('log', 'client.login() resolved.');
-}).catch((error) => {
-  logWithTime('error', 'client.login() failed.', error);
-  process.exit(1);
-});
+async function runDiscordConnectivityChecks() {
+  try {
+    const controller1 = new AbortController();
+    const timer1 = setTimeout(() => controller1.abort(), 10000);
+
+    const meResponse = await fetch('https://discord.com/api/v10/users/@me', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bot ${TOKEN}`,
+      },
+      signal: controller1.signal,
+    });
+
+    clearTimeout(timer1);
+
+    let meText = '';
+    try {
+      meText = await meResponse.text();
+    } catch {}
+
+    logWithTime('log', 'Discord API /users/@me response', {
+      status: meResponse.status,
+      ok: meResponse.ok,
+      bodyPreview: meText.slice(0, 300),
+    });
+  } catch (error) {
+    logWithTime('error', 'Discord API /users/@me failed.', {
+      name: error?.name,
+      message: error?.message,
+      stack: error?.stack,
+    });
+  }
+
+  try {
+    const controller2 = new AbortController();
+    const timer2 = setTimeout(() => controller2.abort(), 10000);
+
+    const gatewayResponse = await fetch('https://discord.com/api/v10/gateway/bot', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bot ${TOKEN}`,
+      },
+      signal: controller2.signal,
+    });
+
+    clearTimeout(timer2);
+
+    let gatewayText = '';
+    try {
+      gatewayText = await gatewayResponse.text();
+    } catch {}
+
+    logWithTime('log', 'Discord API /gateway/bot response', {
+      status: gatewayResponse.status,
+      ok: gatewayResponse.ok,
+      bodyPreview: gatewayText.slice(0, 300),
+    });
+  } catch (error) {
+    logWithTime('error', 'Discord API /gateway/bot failed.', {
+      name: error?.name,
+      message: error?.message,
+      stack: error?.stack,
+    });
+  }
+}
+
+(async () => {
+  await runDiscordConnectivityChecks();
+
+  logWithTime('log', 'About to call client.login()', {
+    hasToken: Boolean(TOKEN),
+    tokenLength: TOKEN ? TOKEN.length : 0,
+  });
+
+  client.login(TOKEN).then(() => {
+    logWithTime('log', 'client.login() resolved.');
+  }).catch((error) => {
+    logWithTime('error', 'client.login() failed.', error);
+    process.exit(1);
+  });
+})();
