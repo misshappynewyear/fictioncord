@@ -657,13 +657,17 @@ async function submitTurn(guildId, userId, text, channel) {
   setSession(guildId, session);
 
   const nextWriterId = session.writers[session.currentWriterIndex];
+  const threadLink = session.threadId
+  ? `https://discord.com/channels/${session.guildId}/${session.threadId}`
+  : null;
 
   await announce(
-    channel,
-    `Turn received.\n` +
-      `Next writer is <@${nextWriterId}>.\n` +
-      `You have ${TURN_HOURS} hours to submit with /submitturn.`
-  );
+  channel,
+  `Turn received.\n` +
+  (threadLink ? `Read it here: ${threadLink}\n` : '') +
+  `Next writer is <@${nextWriterId}>.\n` +
+  `You have ${TURN_HOURS} hours to submit with /submitturn.`
+);
 
   return true;
 }
