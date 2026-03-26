@@ -41,8 +41,8 @@ const MAX_TURN_LENGTH = 1500;
 
 const VOTE_EMOJIS = [
   '0️⃣',
-  '1️⃣','2️⃣','3️⃣','4️⃣','5️⃣',
-  '6️⃣','7️⃣','8️⃣','9️⃣',
+  '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣',
+  '6️⃣', '7️⃣', '8️⃣', '9️⃣',
   '🔟'
 ];
 
@@ -51,6 +51,7 @@ let lastDiscordDisconnectAt = null;
 let lastInteractionAt = null;
 let heartbeatInterval = null;
 let backupInterval = null;
+let sessionProcessInterval = null;
 let restoreAttempted = false;
 
 function now() {
@@ -502,6 +503,10 @@ async function registerCommands() {
       .setDescription('Submit your story turn (opens a modal).'),
 
     new SlashCommandBuilder()
+      .setName('skipmyturn')
+      .setDescription('Skip your current writing turn.'),
+
+    new SlashCommandBuilder()
       .setName('theend')
       .setDescription('End the session and post the story thread link.'),
 
@@ -653,16 +658,16 @@ async function submitTurn(guildId, userId, text, channel) {
 
   const nextWriterId = session.writers[session.currentWriterIndex];
   const threadLink = session.threadId
-  ? `https://discord.com/channels/${session.guildId}/${session.threadId}`
-  : null;
+    ? `https://discord.com/channels/${session.guildId}/${session.threadId}`
+    : null;
 
   await announce(
-  channel,
-  `Turn received.\n` +
-  (threadLink ? `Read it here: ${threadLink}\n` : '') +
-  `Next writer is <@${nextWriterId}>.\n` +
-  `You have ${TURN_HOURS} hours to submit with /submitturn.`
-);
+    channel,
+    `Turn received.\n` +
+      (threadLink ? `Read it here: ${threadLink}\n` : '') +
+      `Next writer is <@${nextWriterId}>.\n` +
+      `You have ${TURN_HOURS} hours to submit with /submitturn.`
+  );
 
   return true;
 }
@@ -774,7 +779,7 @@ async function selectPrompt(session, channel) {
   );
 }
 
-async function advanceTurn(session, channel) {
+async function advanceTurn(session, channel, reason = 'timeout', skippedUserId = null) {
   session.currentWriterIndex = (session.currentWriterIndex + 1) % session.writers.length;
   session.turnEndsAt = hoursFromNow(TURN_HOURS);
   session.reminders.turn12 = false;
@@ -784,9 +789,16 @@ async function advanceTurn(session, channel) {
 
   const nextWriterId = session.writers[session.currentWriterIndex];
 
+  let intro = 'Time is up.';
+  if (reason === 'skip' && skippedUserId) {
+    intro = `<@${skippedUserId}> skipped their turn.`;
+  } else if (reason === 'skip') {
+    intro = 'Turn skipped.';
+  }
+
   await announce(
     channel,
-    `Time is up.\n` +
+    `${intro}\n` +
       `Next writer is <@${nextWriterId}>.\n` +
       `You have ${TURN_HOURS} hours to submit with /submitturn.`
   );
@@ -816,7 +828,7 @@ async function endSession(guildId, userId, channel) {
     return false;
   }
 
-  const mainChannel = await getMainChannel(session) || channel;
+  const mainChannel = (await getMainChannel(session)) || channel;
   const thread = await getStoryThread(session);
 
   await announce(mainChannel, 'The story has ended.');
@@ -884,12 +896,39 @@ async function skipStep(guildId, userId, channel) {
   }
 
   if (session.phase === 'writing') {
-    await advanceTurn(session, channel);
+    await advanceTurn(session, channel, 'skip');
     return true;
   }
 
   await announce(channel, 'Nothing to skip right now.');
   return false;
+}
+
+async function skipMyTurn(guildId, userId, channel) {
+  const session = getSession(guildId);
+
+  if (!session) {
+    await announce(channel, 'No active Fictioncord session.');
+    return false;
+  }
+
+  if (session.phase !== 'writing') {
+    await announce(channel, 'You can only skip your turn during the writing phase.');
+    return false;
+  }
+
+  const currentWriterId = session.writers[session.currentWriterIndex];
+
+  if (currentWriterId !== userId) {
+    await announce(
+      channel,
+      `It is not your turn. Current writer: <@${currentWriterId}>.`
+    );
+    return false;
+  }
+
+  await advanceTurn(session, channel, 'skip', userId);
+  return true;
 }
 
 async function resetSession(guildId, userId, isAdmin, channel) {
@@ -1043,7 +1082,7 @@ async function processSession(session) {
   }
 
   if (freshSession.phase === 'writing' && now() >= freshSession.turnEndsAt) {
-    await advanceTurn(freshSession, channel);
+    await advanceTurn(freshSession, channel, 'timeout');
   }
 }
 
@@ -1097,9 +1136,11 @@ function startIntervals() {
     }, 10 * 60 * 1000);
   }
 
-  setInterval(() => {
-    void processAllSessions();
-  }, 60 * 1000);
+  if (!sessionProcessInterval) {
+    sessionProcessInterval = setInterval(() => {
+      void processAllSessions();
+    }, 60 * 1000);
+  }
 }
 
 client.once(Events.ClientReady, async (readyClient) => {
@@ -1331,6 +1372,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
         modal.addComponents(row);
 
         await interaction.showModal(modal);
+        return;
+      }
+
+      case 'skipmyturn': {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const ok = await skipMyTurn(
+          guildId,
+          interaction.user.id,
+          channel
+        );
+
+        await interaction.editReply({
+          content: ok ? 'Your turn was skipped.' : 'You cannot skip your turn.',
+        });
         return;
       }
 
