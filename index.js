@@ -608,11 +608,6 @@ async function submitPrompt(guildId, userId, promptText, channel) {
     return false;
   }
 
-  if (!session.writers.includes(userId)) {
-    await announce(channel, 'Only enrolled writers can submit prompts.');
-    return false;
-  }
-
   if (session.prompts.length >= VOTE_EMOJIS.length) {
     await announce(channel, `Prompt list is full (max ${VOTE_EMOJIS.length}).`);
     return false;
@@ -1059,13 +1054,15 @@ function createRulesMessage() {
     `2. Writers join with /joinfictioncord.\n` +
     `3. After enrollment closes, the bot announces the writing order.\n` +
     `4. Prompt collection opens for 24 hours.\n` +
-    `5. Only enrolled writers can submit prompts with /submitprompt.\n` +
+    `5. Anyone in the server can submit prompts with /submitprompt.\n` +
     `6. The bot posts the prompts and opens a reaction vote for 24 hours.\n` +
     `7. The winning prompt is selected.\n` +
     `8. The bot creates a story thread.\n` +
     `9. Writers take turns in order using /submitturn.\n` +
-    `10. The leader or current writer can end the session with /theend.\n` +
-    `11. When the session ends, the bot posts the thread link in the main channel.\n\n` +
+    `10. The current writer can use /skipmyturn if they already know they cannot write.\n` +
+    `11. The leader can use /skipstep to advance the current phase.\n` +
+    `12. The leader or current writer can end the session with /theend.\n` +
+    `13. When the session ends, the bot posts the thread link in the main channel.\n\n` +
     `Notes:\n` +
     `- Only the current writer can submit a turn.\n` +
     `- Prompt voting supports up to ${VOTE_EMOJIS.length} prompts.\n` +
