@@ -92,6 +92,14 @@ function loadState() {
 
 let STATE = loadState();
 
+function cloneSession(session) {
+  if (!session) {
+    return null;
+  }
+
+  return JSON.parse(JSON.stringify(session));
+}
+
 function saveState() {
   const tempPath = `${STATE_PATH}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(STATE, null, 2), 'utf8');
@@ -99,19 +107,19 @@ function saveState() {
 }
 
 function getSession(guildId) {
-  return STATE.sessions[guildId] || null;
+  return cloneSession(STATE.sessions[guildId] || null);
 }
 
 function setSession(guildId, session) {
-  STATE.sessions[guildId] = session;
+  STATE.sessions[guildId] = cloneSession(session);
   saveState();
-  void backupStateToDiscord('state-change');
+  void syncBackupState('state-change');
 }
 
 function clearSession(guildId) {
   delete STATE.sessions[guildId];
   saveState();
-  void backupStateToDiscord('state-cleared');
+  void syncBackupState('state-cleared');
 }
 
 function getLeaderId(session) {
@@ -131,6 +139,14 @@ function buildWriterList(writers) {
   }
 
   return writers.map((id, index) => `${index + 1}. <@${id}>`).join('\n');
+}
+
+function buildWriterMentions(writers) {
+  if (!writers.length) {
+    return 'No writers yet.';
+  }
+
+  return writers.map((id) => `<@${id}>`).join(' ');
 }
 
 function buildPromptList(prompts) {
@@ -201,7 +217,6 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
   ],
 });
 
@@ -296,6 +311,15 @@ async function clearBackupChannel() {
   } catch (error) {
     logWithTime('error', 'Failed to clear backup channel.', error);
   }
+}
+
+async function syncBackupState(reason) {
+  if (hasActiveSessions()) {
+    await backupStateToDiscord(reason);
+    return;
+  }
+
+  await clearBackupChannel();
 }
 
 async function backupStateToDiscord(reason = 'state-change') {
@@ -525,6 +549,17 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName('statusfictioncord')
       .setDescription('Show the current session status.'),
+
+    new SlashCommandBuilder()
+      .setName('writers')
+      .setDescription('Send a message that tags all writers in the current session.')
+      .addStringOption((opt) =>
+        opt
+          .setName('message')
+          .setDescription('Message to send to the current Fictioncord writers')
+          .setRequired(true)
+          .setMaxLength(1500)
+      ),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -846,7 +881,6 @@ async function endSession(guildId, userId, channel) {
   }
 
   clearSession(guildId);
-  await clearBackupChannel();
   return true;
 }
 
@@ -869,7 +903,6 @@ async function skipStep(guildId, userId, channel) {
     if (!session.writers.length) {
       await announce(channel, 'Enrollment closed. No writers joined. Session ended.');
       clearSession(session.guildId);
-      await clearBackupChannel();
       return true;
     }
 
@@ -882,7 +915,6 @@ async function skipStep(guildId, userId, channel) {
     if (!session.prompts.length) {
       await announce(channel, 'Prompt collection ended with no prompts. Session ended.');
       clearSession(session.guildId);
-      await clearBackupChannel();
       return true;
     }
 
@@ -957,7 +989,6 @@ async function resetSession(guildId, userId, isAdmin, channel) {
   }
 
   clearSession(guildId);
-  await clearBackupChannel();
   await announce(channel, 'Fictioncord session reset.');
   return true;
 }
@@ -1055,7 +1086,6 @@ async function processSession(session) {
     if (!freshSession.writers.length) {
       await announce(channel, 'Enrollment closed. No writers joined. Session ended.');
       clearSession(freshSession.guildId);
-      await clearBackupChannel();
       return;
     }
 
@@ -1068,7 +1098,6 @@ async function processSession(session) {
     if (!freshSession.prompts.length) {
       await announce(channel, 'Prompt collection ended with no prompts. Session ended.');
       clearSession(freshSession.guildId);
-      await clearBackupChannel();
       return;
     }
 
@@ -1101,7 +1130,8 @@ function createRulesMessage() {
     `10. The current writer can use /skipmyturn if they already know they cannot write.\n` +
     `11. The leader can use /skipstep to advance the current phase.\n` +
     `12. The leader or current writer can end the session with /theend.\n` +
-    `13. When the session ends, the bot posts the thread link in the main channel.\n\n` +
+    `13. Use /writers with a message to notify everyone currently writing in the session.\n` +
+    `14. When the session ends, the bot posts the thread link in the main channel.\n\n` +
     `Notes:\n` +
     `- Only the current writer can submit a turn.\n` +
     `- Prompt voting supports up to ${VOTE_EMOJIS.length} prompts.\n` +
@@ -1198,14 +1228,10 @@ client.on(Events.MessageCreate, async (message) => {
     if (!session.lockedStoryThread) return;
     if (message.channelId !== session.threadId) return;
 
-    const deletedText = message.content
-      ? message.content.slice(0, 1800)
-      : '[no text content]';
-
     await message.delete().catch(() => {});
 
     await message.author.send(
-      `Please do not write directly in the Fictioncord story thread. Use /submitturn in the main channel.\n\n--- Deleted message ---\n${deletedText}`
+      'Please do not write directly in the Fictioncord story thread. Use /submitturn in the main channel.'
     ).catch(() => {});
   } catch (error) {
     logWithTime('error', 'Failed to moderate thread message.', error);
@@ -1448,6 +1474,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `- WS status: ${health.discord.wsStatusName}\n` +
               `- Active sessions: ${health.state.activeSessions}`,
           flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      case 'writers': {
+        const session = getSession(guildId);
+
+        if (!session) {
+          await interaction.reply({
+            content: 'No active Fictioncord session.',
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        const writerMessage = interaction.options.getString('message', true).trim();
+
+        await interaction.reply({
+          content: `${writerMessage}\n${buildWriterMentions(session.writers)}`,
+          allowedMentions: { users: session.writers },
         });
         return;
       }
