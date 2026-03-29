@@ -1123,15 +1123,16 @@ function createRulesMessage() {
     `3. After enrollment closes, the bot announces the writing order.\n` +
     `4. Prompt collection opens for 24 hours.\n` +
     `5. Anyone in the server can submit prompts with /submitprompt.\n` +
-    `6. The bot posts the prompts and opens a reaction vote for 24 hours.\n` +
+    `6. Anyone in the server can vote on prompts during the 24-hour reaction vote.\n` +
     `7. The winning prompt is selected.\n` +
     `8. The bot creates a story thread.\n` +
     `9. Writers take turns in order using /submitturn.\n` +
-    `10. The current writer can use /skipmyturn if they already know they cannot write.\n` +
-    `11. The leader can use /skipstep to advance the current phase.\n` +
-    `12. The leader or current writer can end the session with /theend.\n` +
-    `13. Use /writers with a message to notify everyone currently writing in the session.\n` +
-    `14. When the session ends, the bot posts the thread link in the main channel.\n\n` +
+    `10. Turn confirmations include the story thread link when available.\n` +
+    `11. The current writer can use /skipmyturn if they already know they cannot write.\n` +
+    `12. Anyone in the channel can use /writers with a message to notify everyone currently writing in the session.\n` +
+    `13. The leader can use /skipstep to advance the current phase.\n` +
+    `14. The leader or current writer can end the session with /theend.\n` +
+    `15. When the session ends, the bot posts the thread link in the main channel.\n\n` +
     `Notes:\n` +
     `- Only the current writer can submit a turn.\n` +
     `- Prompt voting supports up to ${VOTE_EMOJIS.length} prompts.\n` +
